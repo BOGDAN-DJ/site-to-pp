@@ -1,0 +1,217 @@
+@charset "windows-1251";
+/* CSS Document */
+#cont {
+    width: 100%;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    height: 2px;
+}
+
+#progress {
+    /**background: #2EE59D;*/
+    width: 0%;
+    height: 4px;
+
+    background: rgba(0,250,29,1);
+    background: -moz-linear-gradient(left, rgba(0,250,29,1) 0%, rgba(27,148,90,1) 53%, rgba(51,57,145,1) 100%);
+    background: -webkit-gradient(left top, right top, color-stop(0%, rgba(0,250,29,1)), color-stop(53%, rgba(27,148,90,1)), color-stop(100%, rgba(51,57,145,1)));
+    background: -webkit-linear-gradient(left, rgba(0,250,29,1) 0%, rgba(27,148,90,1) 53%, rgba(51,57,145,1) 100%);
+    background: -o-linear-gradient(left, rgba(0,250,29,1) 0%, rgba(27,148,90,1) 53%, rgba(51,57,145,1) 100%);
+    background: -ms-linear-gradient(left, rgba(0,250,29,1) 0%, rgba(27,148,90,1) 53%, rgba(51,57,145,1) 100%);
+    background: linear-gradient(to right, rgba(0,250,29,1) 0%, rgba(27,148,90,1) 53%, rgba(51,57,145,1) 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#00fa1d', endColorstr='#333991', GradientType=1 );
+}
+
+
+body {
+    background: url("img/background.png");
+    font-size: 15px;
+    font-family: 'Bad Script', cursive;
+    margin: 0;
+    padding: 0;
+    color: #444;
+}
+
+h1{
+    /*font-size: 11px;*/
+    font-family: 'Bad Script', cursive;
+    font-weight: 700;
+    color: #444;
+}
+
+h2{
+    font-size: 40px;
+    font-family: 'Bad Script', cursive;
+    font-weight: 700;
+    margin: 5px 10px;
+    padding: 0;
+    color: #444;
+}
+
+.footer{
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.top2{
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* <p>ÚÂ„</p> */
+p {
+    margin: 5px 25px;
+    font-family: 'Bad Script', cursive;
+    font-weight: 600;
+    color: #444;
+}
+
+/* <a>ÚÂ„</a> */
+a {
+    text-decoration: none;
+    outline: none;
+    display: inline-block;
+    width: 140px;
+    height: 45px;
+    line-height: 45px;
+    border-radius: 45px;
+    margin: 10px 20px;
+    font-family: 'Bad Script', cursive;
+    font-size: 11px;
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 3px;
+    font-weight: 600;
+    color: #524f4e;
+    background: white;
+    box-shadow: 0 8px 15px rgba(0,0,0,.1);
+    transition: .3s;
+}
+a:hover {
+    background: #2EE59D;
+    box-shadow: 0 15px 20px rgba(46,229,157,.4);
+    color: white;
+    transform: translateY(-7px);
+}
+/* —Œ÷-—≈“» */
+.vk {
+    text-decoration: none;
+    outline: none;
+    display: inline-block;
+    width: 45px;
+    height: 45px;
+    line-height: 45px;
+    border-radius: 45px;
+    margin: 10px 20px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 3px;
+    font-weight: 600;
+    color: transparent;
+    background: rgba(74, 118, 168,.4) url("img/vk1.png");
+    background-size: 45px 45px;
+    box-shadow: 0 8px 15px rgba(0,0,0,.1);
+    transition: .3s;
+}
+.vk:hover {
+    background: url("img/vk.png");
+    background-size: 45px 45px;
+    box-shadow: 0 15px 20px rgba(74, 118, 168,.4);
+    color: transparent;
+    transform: translateY(-7px);
+}
+
+.fb {
+    text-decoration: none;
+    outline: none;
+    display: inline-block;
+    width: 45px;
+    height: 45px;
+    line-height: 45px;
+    border-radius: 45px;
+    margin: 10px 20px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 3px;
+    font-weight: 600;
+    color: transparent;
+    background: rgba(66, 103, 178,.4) url("img/fb1.png");
+    background-size: 45px 45px;
+    box-shadow: 0 8px 15px rgba(0,0,0,.1);
+    transition: .3s;
+}
+.fb:hover {
+    background: url("img/fb.png");
+    background-size: 45px 45px;
+    box-shadow: 0 15px 20px rgba(66, 103, 178,.4);
+    color: transparent;
+    transform: translateY(-7px);
+}
+
+.ok {
+    text-decoration: none;
+    outline: none;
+    display: inline-block;
+    width: 45px;
+    height: 45px;
+    line-height: 45px;
+    border-radius: 45px;
+    margin: 10px 20px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 3px;
+    font-weight: 600;
+    color: transparent;
+    background: rgba(238, 130, 8,.4) url("img/ok1.png");
+    background-size: 45px 45px;
+    box-shadow: 0 8px 15px rgba(0,0,0,.1);
+    transition: .3s;
+}
+.ok:hover {
+    background: url("img/ok.png");
+    background-size: 45px 45px;
+    box-shadow: 0 15px 20px rgba(238, 130, 8,.4);
+    color: transparent;
+    transform: translateY(-7px);
+}
+
+.tg {
+    text-decoration: none;
+    outline: none;
+    display: inline-block;
+    width: 45px;
+    height: 45px;
+    line-height: 45px;
+    border-radius: 45px;
+    margin: 10px 20px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 3px;
+    font-weight: 600;
+    color: transparent;
+    background: rgba(51, 170, 223,.4) url("img/tg1.png");
+    background-size: 45px 45px;
+    box-shadow: 0 8px 15px rgba(0,0,0,.1);
+    transition: .3s;
+}
+.tg:hover {
+    background: url("img/tg.png");
+    background-size: 45px 45px;
+    box-shadow: 0 15px 20px rgba(51, 170, 223,.4);
+    color: transparent;
+    transform: translateY(-7px);
+}
