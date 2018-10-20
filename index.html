@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <title>Сайт</title>
+</head>
+<frameset rows="15%,80%,5%" frameborder="0" framespacing="0">
+    <frameset cols="14.5%,14.5%">
+         <frame src="top.html">
+        <frame src="top2.html">
+    </frameset>
+    <frameset cols="200,*">
+        <frame src="menu.html">
+        <frame src="content.html" name="main">
+    </frameset>
+    <frame src="footer.html">
+    <noframes>Ваш браузер не поддерживает отображение фреймов</noframes>
+</frameset>
+<body>
+<div id="cont">
+    <div id="progress"></div>
+</div>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
+<script>
+    $(window).scroll(function () {
+        var ratio = $(document).scrollTop () / (($(document).height () - $(window).height ()) / 100);
+        $("#progress").width (ratio + "%");
+    });
+</script>
+</body>
+</html>
