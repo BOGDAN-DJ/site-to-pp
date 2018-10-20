@@ -23,6 +23,21 @@
     filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#00fa1d', endColorstr='#333991', GradientType=1 );
 }
 
+::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+
+/*::-webkit-scrollbar-track {
+box-shadow: inset 0 0 10px olivedrab;
+border-radius: 10px;
+}*/
+
+::-webkit-scrollbar-thumb {
+    border-radius: 10px;
+    background: yellowgreen;
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.4);
+}
 
 body {
     background: url("img/background.png");
