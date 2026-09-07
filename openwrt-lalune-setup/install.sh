@@ -91,6 +91,24 @@ else
 	ssh "$ROUTER" 'chmod 600 /etc/csqtt/csqtt.conf'
 fi
 
+# Штатный sysupgrade сохраняет через обновление прошивки только то, что
+# перечислено в /etc/sysupgrade.conf, а базовый список туда наши файлы не
+# включает. Без этого следующее же обновление OpenWrt стёрло бы и демон, и
+# его конфиг с ключами подключения.
+#
+# Бинарники (/usr/sbin/csqtt-daemon, /opt) намеренно НЕ добавляем: они
+# большие, а sysupgrade кладёт список в оперативную память на время
+# прошивки. Их проще поставить заново через install.sh, а вот конфиг с
+# ключами восстановить неоткуда.
+echo "==> Прописываю файлы в /etc/sysupgrade.conf"
+ssh "$ROUTER" 'sh -s' <<'REMOTE'
+for f in /etc/csqtt/csqtt.conf /etc/rc.button/BTN_0; do
+	grep -qxF "$f" /etc/sysupgrade.conf 2>/dev/null || echo "$f" >> /etc/sysupgrade.conf
+done
+echo "    сейчас в списке:"
+grep -v '^#' /etc/sysupgrade.conf | grep -v '^$' | sed 's/^/      /'
+REMOTE
+
 echo "==> Включаю сервис"
 ssh "$ROUTER" 'chmod +x /usr/sbin/csqtt-daemon /etc/init.d/csqtt && /etc/init.d/csqtt enable && /etc/init.d/csqtt restart'
 
