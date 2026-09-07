@@ -42,6 +42,14 @@ type Config struct {
 	// (и мигающий во время подключения). Пустое значение отключает
 	// индикацию.
 	Led string
+	// Listen - адрес, на котором висят панель и API.
+	//
+	// Пустое значение означает "определить LAN-адрес роутера сам" — см.
+	// listenAddr(). Слушать ":8080" на всех интерфейсах по умолчанию было
+	// бы неправильно: панель принимает и показывает параметры подключения,
+	// а единственным, что отделяло бы её от WAN, оказалось бы правило
+	// firewall. Полагаться на это не стоит.
+	Listen string
 	// LedIdle - светодиод, горящий когда туннеля нет. На Cudy TR3000 это
 	// второй цвет того же физического индикатора: гасить его совсем было
 	// бы плохо, роутер выглядел бы выключенным.
@@ -134,6 +142,10 @@ func (a *App) loadConfig() {
 			a.config.Led = value
 		case "LED_IDLE":
 			a.config.LedIdle = value
+		case "LISTEN":
+			if value != "" {
+				a.config.Listen = value
+			}
 		case "LAN_SUBNETS":
 			a.config.LanSubnets = value
 		}
@@ -166,6 +178,7 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "SWITCH_LABEL='%s'\n", a.config.SwitchLabel)
 	fmt.Fprintf(&b, "LED='%s'\n", a.config.Led)
 	fmt.Fprintf(&b, "LED_IDLE='%s'\n", a.config.LedIdle)
+	fmt.Fprintf(&b, "LISTEN='%s'\n", a.config.Listen)
 	fmt.Fprintf(&b, "LAN_SUBNETS='%s'\n", a.config.LanSubnets)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)

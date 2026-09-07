@@ -7,3 +7,4 @@
 *.go          text eol=lf
 OpenWRT/files/*      text eol=lf
 OpenWRT/files/*.init text eol=lf
+*.html        text eol=lf

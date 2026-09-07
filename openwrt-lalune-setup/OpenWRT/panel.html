@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSQTT</title>
+<style>
+:root{
+  --bg:#f4f5f7; --card:#fff; --fg:#16181d; --muted:#6b7280; --line:#e3e5e9;
+  --ok:#15803d; --ok-bg:#dcfce7; --off:#b91c1c; --off-bg:#fee2e2;
+  --wait:#a16207; --wait-bg:#fef9c3; --accent:#1d4ed8;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1115; --card:#181b22; --fg:#e8eaed; --muted:#9aa1ad; --line:#282c35;
+  --ok:#4ade80; --ok-bg:#16341f; --off:#f87171; --off-bg:#3a1a1a;
+  --wait:#fbbf24; --wait-bg:#3a2f10; --accent:#60a5fa;
+}}
+*{box-sizing:border-box}
+body{margin:0 auto;padding:16px;background:var(--bg);color:var(--fg);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:680px}
+h1{font-size:17px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+h1 small{font-weight:400;color:var(--muted);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:14px;margin-bottom:12px}
+.state{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.badge{font-weight:600;padding:5px 12px;border-radius:999px;font-size:14px}
+.badge.on{color:var(--ok);background:var(--ok-bg)}
+.badge.off{color:var(--off);background:var(--off-bg)}
+.badge.wait{color:var(--wait);background:var(--wait-bg)}
+button{font:inherit;font-weight:600;padding:9px 18px;border-radius:8px;
+  border:1px solid var(--line);background:var(--accent);color:#fff;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg)}
+button:disabled{opacity:.5;cursor:default}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:14px}
+.m{border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+.m .k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.m .v{font-size:19px;font-weight:600;margin-top:2px;
+  font-variant-numeric:tabular-nums;overflow-wrap:break-word}
+.m.long .v{font-size:14px;line-height:1.35}
+.m .v small{font-size:12px;font-weight:400;color:var(--muted)}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+input{width:100%;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;
+  padding:9px 10px;border:1px solid var(--line);border-radius:8px;
+  background:var(--bg);color:var(--fg)}
+.row{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+.note{font-size:12px;color:var(--muted);margin-top:9px}
+.msg{font-size:13px;margin-top:9px;padding:8px 10px;border-radius:7px;display:none}
+.msg.ok{display:block;color:var(--ok);background:var(--ok-bg)}
+.msg.err{display:block;color:var(--off);background:var(--off-bg)}
+pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:8px;
+  padding:10px;font:11.5px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;
+  max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.bar{height:5px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--ok);width:0;transition:width .4s}
+</style>
+</head>
+<body>
+
+<h1>CSQTT <small id="ver"></small></h1>
+
+<div class="card">
+  <div class="state">
+    <span id="badge" class="badge off">…</span>
+    <button id="toggle" disabled>…</button>
+  </div>
+  <div class="grid">
+    <div class="m"><div class="k">Потоки</div>
+      <div class="v"><span id="active">—</span><small id="workers"></small></div>
+      <div class="bar"><i id="bar"></i></div></div>
+    <div class="m"><div class="k">Трафик</div><div class="v" id="traffic">—</div></div>
+    <div class="m"><div class="k">В сети</div><div class="v" id="uptime">—</div></div>
+    <div class="m long"><div class="k">Канал</div><div class="v" id="underlay">—</div></div>
+    <div class="m long"><div class="k">IP туннеля</div><div class="v" id="tunip">—</div></div>
+    <div class="m long"><div class="k">Сервер</div><div class="v" id="peer">—</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <label for="link">Ссылка подключения</label>
+  <input id="link" placeholder="csqtt://connect?v=2&amp;host=…&amp;peer=…&amp;password=…&amp;hashes=…"
+         autocomplete="off" spellcheck="false">
+  <div class="row"><button id="save">Сохранить</button></div>
+  <div id="msg" class="msg"></div>
+  <div class="note">Из ссылки берутся адрес сервера, пароль и VK-хеши.
+    Остальные настройки не меняются. Пароль в панели не показывается —
+    даже после сохранения.</div>
+</div>
+
+<div class="card">
+  <div class="state"><strong style="font-size:14px">Журнал</strong>
+    <button id="reload" class="ghost">Обновить</button></div>
+  <pre id="log">…</pre>
+</div>
+
+<script>
+var busy = false;
+
+function j(url, opts) {
+  return fetch(url, opts).then(function (r) { return r.json(); });
+}
+
+function fmtUptime(s) {
+  if (!s) return '—';
+  var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  if (h) return h + ' ч ' + m + ' мин';
+  if (m) return m + ' мин';
+  return s + ' с';
+}
+
+function setBadge(st) {
+  var b = document.getElementById('badge'), t = document.getElementById('toggle');
+  b.className = 'badge';
+  if (st.tun_up) { b.classList.add('on'); b.textContent = 'Туннель поднят'; }
+  else if (st.connected) { b.classList.add('wait'); b.textContent = 'Подключение…'; }
+  else { b.classList.add('off'); b.textContent = 'Выключен'; }
+  t.textContent = st.connected ? 'Отключить' : 'Подключить';
+  t.disabled = busy || (!st.connected && !st.configured);
+  t.title = (!st.connected && !st.configured) ? 'Сначала сохраните ссылку подключения' : '';
+}
+
+function refresh() {
+  return j('/api/status').then(function (st) {
+    setBadge(st);
+    document.getElementById('ver').textContent = st.version || '';
+    document.getElementById('active').textContent = st.connected ? st.active : '—';
+    document.getElementById('workers').textContent = st.workers ? ' / ' + st.workers : '';
+    document.getElementById('bar').style.width =
+      (st.workers ? Math.round(100 * st.active / st.workers) : 0) + '%';
+    document.getElementById('traffic').textContent =
+      st.connected ? st.traffic_mb.toFixed(2) + ' МБ' : '—';
+    document.getElementById('uptime').textContent = fmtUptime(st.uptime_sec);
+    document.getElementById('underlay').textContent = st.underlay || '—';
+    document.getElementById('tunip').textContent = st.tun_ip || '—';
+    document.getElementById('peer').textContent = st.peer || 'не задан';
+  }).catch(function () {
+    var b = document.getElementById('badge');
+    b.className = 'badge off';
+    b.textContent = 'Демон не отвечает';
+  });
+}
+
+function loadLog() {
+  fetch('/api/logs').then(function (r) { return r.text(); }).then(function (t) {
+    var el = document.getElementById('log');
+    el.textContent = t.trim().split('\n').slice(-60).join('\n');
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+function msg(text, ok) {
+  var m = document.getElementById('msg');
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  m.textContent = text;
+}
+
+document.getElementById('toggle').onclick = function () {
+  busy = true;
+  this.disabled = true;
+  this.textContent = '…';
+  j('/api/toggle', { method: 'POST' }).then(function (r) {
+    busy = false;
+    if (r.error) msg(r.error, false);
+    refresh();
+    setTimeout(loadLog, 800);
+  }).catch(function () { busy = false; refresh(); });
+};
+
+document.getElementById('save').onclick = function () {
+  var link = document.getElementById('link').value.trim();
+  if (!link) { msg('Вставьте ссылку', false); return; }
+  this.disabled = true;
+  j('/api/config/link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ link: link })
+  }).then(function (r) {
+    document.getElementById('save').disabled = false;
+    if (r.success) {
+      msg('Сохранено: ' + r.peer + ', хешей ' + r.hashes +
+        (r.applied ? '' : '. Переподключитесь, чтобы применить.'), true);
+      document.getElementById('link').value = '';
+      refresh();
+    } else {
+      msg(r.error || 'не сохранить', false);
+    }
+  }).catch(function () {
+    document.getElementById('save').disabled = false;
+    msg('Демон не отвечает', false);
+  });
+};
+
+document.getElementById('reload').onclick = loadLog;
+
+refresh();
+loadLog();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

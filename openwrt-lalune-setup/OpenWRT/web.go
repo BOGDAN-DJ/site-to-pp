@@ -1,0 +1,197 @@
+package main
+
+import (
+	_ "embed"
+	"encoding/json"
+	"net"
+	"net/http"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+//go:embed panel.html
+var panelHTML []byte
+
+// Разбор строки статистики ядра:
+//
+//	[СТАТИСТИКА] Активных: 18 | Трафик: 2.18 МБ
+//
+// Панели нужны числа, а не текст, поэтому вытаскиваем их отдельно. Если
+// формат строки в ядре когда-нибудь поменяется, поля просто окажутся
+// нулевыми — панель это переживёт, а строку целиком она показывает рядом.
+var (
+	reStatsActive  = regexp.MustCompile(`Активных:\s*(\d+)`)
+	reStatsTraffic = regexp.MustCompile(`Трафик:\s*([\d.]+)`)
+)
+
+// statusSnapshot - то, что отдаётся в /api/status и рисуется панелью.
+type statusSnapshot struct {
+	Connected bool   `json:"connected"`
+	TunUp     bool   `json:"tun_up"`
+	PID       int    `json:"pid"`
+	CoreStats string `json:"core_stats"`
+
+	Active  int     `json:"active"`
+	Workers int     `json:"workers"`
+	Traffic float64 `json:"traffic_mb"`
+	Uptime  int     `json:"uptime_sec"`
+
+	TunName  string `json:"tun_name"`
+	TunIP    string `json:"tun_ip"`
+	Underlay string `json:"underlay"`
+
+	Peer        string `json:"peer"`
+	Configured  bool   `json:"configured"`
+	AutoConnect string `json:"autoconnect"`
+
+	Version string `json:"version"`
+}
+
+func (a *App) snapshot() statusSnapshot {
+	a.mu.Lock()
+	s := statusSnapshot{
+		Connected:   a.connected,
+		TunUp:       a.tunUp,
+		PID:         a.corePID,
+		CoreStats:   a.coreStats,
+		Workers:     a.config.Workers,
+		TunName:     a.config.Tun,
+		TunIP:       a.tunIP,
+		Peer:        a.config.Peer,
+		AutoConnect: a.config.AutoConnect,
+		Version:     daemonVersion,
+	}
+	s.Configured = a.config.Peer != "" && a.config.Password != "" && a.config.VkHashes != ""
+	if !a.connectedAt.IsZero() && a.connected {
+		s.Uptime = int(time.Since(a.connectedAt).Seconds())
+	}
+	stats := a.coreStats
+	a.mu.Unlock()
+
+	if m := reStatsActive.FindStringSubmatch(stats); m != nil {
+		s.Active, _ = strconv.Atoi(m[1])
+	}
+	if m := reStatsTraffic.FindStringSubmatch(stats); m != nil {
+		s.Traffic, _ = strconv.ParseFloat(m[1], 64)
+	}
+	// Канал перечитываем каждый раз, а не берём запомненный: при двух WAN
+	// он меняется на ходу, и панель должна показывать текущий.
+	if r := getDefaultRoute(s.TunName); r.has {
+		s.Underlay = r.String()
+	}
+
+	return s
+}
+
+// handleLink принимает ссылку csqtt://connect?... и накладывает её на
+// существующий конфиг. Именно накладывает: ссылка несёт только peer,
+// password и хеши, а остальные настройки должны пережить её замену.
+func (a *App) handleLink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Link string `json:"link"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не разобрать запрос"})
+		return
+	}
+
+	peer, password, vk, err := parseCSQTTLink(body.Link)
+	if err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+
+	a.mu.Lock()
+	a.config.Peer = peer
+	a.config.Password = password
+	a.config.VkHashes = vk
+	a.mu.Unlock()
+
+	if err := a.saveConfig(); err != nil {
+		log("[CONFIG] Ошибка сохранения: %v", err)
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не сохранить конфиг"})
+		return
+	}
+
+	// Пароль и хеши в лог не пишем — только адрес и число хешей.
+	log("[CONFIG] Ссылка принята: peer=%s, хешей=%d", peer, len(strings.Split(vk, ",")))
+
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"peer":    peer,
+		"hashes":  len(strings.Split(vk, ",")),
+		"applied": !a.IsConnected(),
+	})
+}
+
+func (a *App) handlePanel(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Панель самодостаточна: ни одного внешнего ресурса, потому что роутер
+	// может быть без интернета ровно в тот момент, когда панель нужнее всего.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
+	w.Write(panelHTML)
+}
+
+// listenAddrs возвращает адреса, на которых поднимать панель и API.
+//
+// Loopback присутствует всегда: по 127.0.0.1:8080 ходят скрипт
+// переключателя, install.sh и любая отладка через ssh — потерять этот
+// адрес нельзя.
+//
+// Второй адрес — LAN-интерфейс роутера (или заданный в LISTEN). Слушать
+// все интерфейсы (":8080") по умолчанию неправильно: панель отдаёт и
+// принимает параметры подключения, а от WAN её отделял бы только firewall,
+// и это слишком тонкая защита для таких данных.
+//
+// Если LAN-адрес определить не удалось, остаёмся на одном loopback: пусть
+// панель будет доступна только через «ssh -L», чем случайно окажется
+// открытой наружу.
+func (a *App) listenAddrs() []string {
+	const loopback = "127.0.0.1:8080"
+	addrs := []string{loopback}
+
+	if a.config.Listen != "" {
+		if a.config.Listen != loopback {
+			addrs = append(addrs, a.config.Listen)
+		}
+		return addrs
+	}
+
+	dev := "br-lan"
+	if out, err := exec.Command("uci", "-q", "get", "network.lan.device").Output(); err == nil {
+		if d := strings.TrimSpace(string(out)); d != "" {
+			dev = d
+		}
+	}
+
+	out, err := exec.Command("ip", "-4", "-o", "addr", "show", "dev", dev).Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f != "inet" || i+1 >= len(fields) {
+					continue
+				}
+				if ip, _, err := net.ParseCIDR(fields[i+1]); err == nil {
+					return append(addrs, net.JoinHostPort(ip.String(), "8080"))
+				}
+			}
+		}
+	}
+
+	log("[API] Не удалось определить адрес LAN (%s) — слушаю только loopback. "+
+		"Задайте LISTEN в конфиге, если панель нужна из локальной сети.", dev)
+	return addrs
+}

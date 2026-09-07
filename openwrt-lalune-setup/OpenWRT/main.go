@@ -35,6 +35,10 @@ import (
 	"github.com/songgao/water"
 )
 
+// daemonVersion показывается в панели — по нему видно, тот ли бинарник
+// реально запущен на роутере после обновления.
+const daemonVersion = "1.0"
+
 const (
 	corePath   = "/usr/bin/csqtt-client"
 	logPath    = "/tmp/csqtt-client.log"
@@ -79,6 +83,9 @@ type App struct {
 	// потому, что в лог такие строки попадают прорежёнными, а текущие
 	// цифры хочется видеть сразу и целиком.
 	coreStats string
+	// tunIP и connectedAt нужны панели: адрес туннеля и время в сети.
+	tunIP       string
+	connectedAt time.Time
 	// noiseLogged - когда в последний раз пропускали в лог строку каждого
 	// из повторяющихся классов (см. coreNoise).
 	noiseLogged map[string]time.Time
@@ -302,6 +309,8 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 	a.udpConn = udpConn
 	a.bridgeCh = bridgeCh
 	a.tunUp = true
+	a.tunIP = conf.ip
+	a.connectedAt = time.Now()
 	a.mu.Unlock()
 
 	log("[TUN] Туннель поднят: %s %s/32, в туннель идёт %v", ifce.Name(), conf.ip, subnets)
@@ -387,6 +396,8 @@ func (a *App) Disconnect() bool {
 
 	a.connected = false
 	a.tunUp = false
+	a.tunIP = ""
+	a.connectedAt = time.Time{}
 	a.coreCmd = nil
 	a.coreDone = nil
 	a.corePID = 0
@@ -533,17 +544,7 @@ func (a *App) startAPI() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		status := map[string]interface{}{
-			"connected": a.connected,
-			"tun_up":    a.tunUp,
-			"pid":       a.corePID,
-			// Статистика ядра приходит раз в секунду и в лог попадает
-			// прорежённой — здесь всегда самая свежая.
-			"core_stats": a.coreStats,
-		}
-		a.mu.Unlock()
-		writeJSON(w, status)
+		writeJSON(w, a.snapshot())
 	})
 
 	mux.HandleFunc("/api/connect", func(w http.ResponseWriter, r *http.Request) {
@@ -578,6 +579,9 @@ func (a *App) startAPI() {
 		}
 		writeJSON(w, resp)
 	})
+
+	mux.HandleFunc("/", a.handlePanel)
+	mux.HandleFunc("/api/config/link", a.handleLink)
 
 	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -627,10 +631,22 @@ func (a *App) startAPI() {
 		writeJSON(w, map[string]bool{"success": true})
 	})
 
-	log("[API] Запущен на :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		log("[API] Остановлен: %v", err)
+	// Слушаем каждый адрес отдельным сервером на общем mux: один
+	// ListenAndServe умеет только один адрес, а нам нужны и loopback (для
+	// скрипта переключателя и отладки), и LAN (для панели).
+	addrs := a.listenAddrs()
+	var wg sync.WaitGroup
+	for _, addr := range addrs {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			log("[API] Слушаю http://%s/", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				log("[API] %s остановлен: %v", addr, err)
+			}
+		}(addr)
 	}
+	wg.Wait()
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
