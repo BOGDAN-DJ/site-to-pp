@@ -14,25 +14,19 @@ import (
 	"github.com/songgao/water"
 )
 
-// defaultRoute - «нижележащий» маршрут по умолчанию, то есть тот, которым
-// роутер ходит в интернет помимо туннеля. Нужен, чтобы прокладывать через
-// него обходные маршруты к peer/TURN: сам туннель поднимается через сервер,
-// до которого надо как-то добраться, и заворачивать этот трафик в туннель
-// нельзя.
+// defaultRoute - маршрут по умолчанию из основной таблицы, то есть канал,
+// которым роутер ходит в интернет помимо туннеля.
 //
-// На роутерах с несколькими WAN (у Cudy TR3000 это usb0 с метрикой 10 и
-// eth0 с метрикой 300) такой маршрут меняется на ходу — модем воткнули,
-// модем вынули. Поэтому он не снимается один раз при подключении, а
-// перечитывается: см. watchUnderlay в main.go.
+// Управлять им не нужно — этим занимается netifd, в том числе при
+// переключении между WAN (на Cudy TR3000 это usb0 с метрикой 10 и eth0 с
+// метрикой 300). Демон только смотрит на него: чтобы дождаться готовности
+// сети перед автоподключением и чтобы записать в лог, через какой канал
+// поднимается туннель.
 type defaultRoute struct {
 	has     bool
 	gateway string
 	dev     string
 	metric  string
-}
-
-func (r defaultRoute) sameAs(o defaultRoute) bool {
-	return r.has == o.has && r.gateway == o.gateway && r.dev == o.dev
 }
 
 func (r defaultRoute) String() string {
@@ -101,100 +95,115 @@ func runIP(args ...string) error {
 	return err
 }
 
-// needsBypassRoute сообщает, нужен ли отдельный host-маршрут к ip.
+// Направление трафика в туннель через policy routing.
 //
-// Если адрес лежит в подсети, подключённой к интерфейсу напрямую, его уже
-// обслуживает connected-маршрут: он длиннее default и спокойно переживёт
-// его подмену на туннель. Прокладывать для такого адреса /32 "via шлюз" не
-// просто лишнее, а вредно — пакет уходит на шлюз, которому приходится
-// разворачивать его обратно в ту же подсеть, и часть роутеров этого не
-// делает вовсе.
+// Основная таблица маршрутизации не трогается вообще: default route,
+// которым управляет netifd, остаётся единственным и нетронутым. Туннельный
+// default живёт в отдельной таблице tunTable, а попадают в неё только
+// пакеты из локальной сети — по правилам `ip rule`.
 //
-// Отличаем одно от другого по выводу `ip route get`: для адреса за шлюзом
-// там есть "via", для напрямую доступного — только "dev".
+// Почему не проще, через default с метрикой 1 в основной таблице (как было
+// раньше): туда попадал и трафик самого ядра csqtt-client. А ядру, чтобы
+// поднять или восстановить сессии, надо ходить на серверы авторизации VK —
+// и эти запросы уходили в туннель, который ядро в этот момент и пытается
+// починить. Получался замкнутый круг: стоило туннелю упасть, и подняться
+// сам он уже не мог никогда, потому что DNS и HTTP к VK уходили в мёртвый
+// интерфейс. Наблюдалось вживую:
 //
-//	# ip route get 192.168.31.199
-//	192.168.31.199 dev eth0 src 192.168.31.179
-//	# ip route get 8.8.8.8
-//	8.8.8.8 via 192.168.31.100 dev eth0 src 192.168.31.179
+//	[CORE] ... dns error: Yandex DNS не ответил за 5 секунд для login.vk.ru
+//	[CORE] [СТАТИСТИКА] Активных: 0
 //
-// Вызывать до подмены default route — после неё ответ будет уже про туннель.
-func needsBypassRoute(ip string) bool {
-	out, err := exec.Command("ip", "-4", "route", "get", ip).Output()
+// Теперь трафик роутера (включая ядро и сам демон) всегда идёт по основной
+// таблице напрямую, а в туннель уходит только то, что пришло из LAN. Заодно
+// это убрало необходимость в обходных маршрутах к peer/TURN и в слежении за
+// сменой WAN: переключением каналов целиком занимается netifd.
+const (
+	tunTable = "100"
+
+	// Приоритеты правил. Оба ниже 32766 (main), чтобы срабатывать раньше
+	// него, и заметно выше 0 (local), чтобы не мешать обращениям к самому
+	// роутеру.
+	ruleLocalPrio  = "29000"
+	ruleTunnelPrio = "29001"
+)
+
+// setTunnelPolicyRoutes отправляет в туннель трафик из перечисленных
+// подсетей.
+//
+// Правил на подсеть два, и порядок важен:
+//
+//	29000: from <lan> lookup main suppress_prefixlength 0
+//	29001: from <lan> lookup 100
+//
+// Первое разрешает по основной таблице всё, у чего есть конкретный маршрут
+// (соседи по локальной сети, сама WAN-подсеть), но благодаря
+// suppress_prefixlength 0 пропускает мимо default route. Без него весь
+// трафик внутри локальной сети тоже уходил бы в туннель. Всё, что не нашло
+// конкретного маршрута, доходит до второго правила и уходит в туннель.
+func setTunnelPolicyRoutes(tunName string, subnets []string) {
+	runIP("route", "replace", "default", "dev", tunName, "table", tunTable)
+
+	for _, s := range subnets {
+		runIP("rule", "add", "from", s, "lookup", "main",
+			"suppress_prefixlength", "0", "priority", ruleLocalPrio)
+		runIP("rule", "add", "from", s, "lookup", tunTable, "priority", ruleTunnelPrio)
+	}
+}
+
+// clearTunnelPolicyRoutes снимает правила и чистит таблицу. Основная таблица
+// при этом не менялась, поэтому восстанавливать в ней нечего — маршрут WAN
+// всё это время был на месте.
+func clearTunnelPolicyRoutes(subnets []string) {
+	for range subnets {
+		// Удаляем по приоритету: правил с одним приоритетом столько же,
+		// сколько подсетей, и каждый вызов снимает по одному.
+		runIP("rule", "del", "priority", ruleLocalPrio)
+		runIP("rule", "del", "priority", ruleTunnelPrio)
+	}
+	runIP("route", "flush", "table", tunTable)
+}
+
+// lanSubnets возвращает подсети, трафик которых надо заворачивать в туннель.
+// По умолчанию это адреса LAN-интерфейса из uci (на OpenWrt br-lan).
+func lanSubnets(configured string) []string {
+	if configured != "" {
+		var out []string
+		for _, s := range strings.Split(configured, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+
+	dev := "br-lan"
+	if out, err := exec.Command("uci", "-q", "get", "network.lan.device").Output(); err == nil {
+		if d := strings.TrimSpace(string(out)); d != "" {
+			dev = d
+		}
+	}
+
+	out, err := exec.Command("ip", "-4", "-o", "addr", "show", "dev", dev).Output()
 	if err != nil {
-		// Не смогли выяснить — безопаснее проложить маршрут, чем остаться
-		// без связи с сервером после переключения default route.
-		return true
-	}
-	return strings.Contains(string(out), " via ")
-}
-
-// addBypassRoute прокладывает host-маршрут (/32) к ip через исходный шлюз,
-// чтобы трафик к серверу CSQTT (и его TURN/relay-узлам) не пытался уйти
-// в туннель, который сам через этот сервер и поднимается.
-//
-// Возвращает true, если маршрут действительно был добавлен — вызывающий код
-// запоминает только такие адреса, чтобы при отключении не удалить чужой
-// маршрут, которого он не создавал.
-func addBypassRoute(orig defaultRoute, ip string) bool {
-	if !orig.has || net.ParseIP(ip) == nil {
-		return false
-	}
-	if !needsBypassRoute(ip) {
-		log("[ROUTE] %s доступен напрямую, обходной маршрут не нужен", ip)
-		return false
-	}
-	args := []string{"route", "replace", ip + "/32"}
-	if orig.gateway != "" {
-		args = append(args, "via", orig.gateway)
-	}
-	args = append(args, "dev", orig.dev)
-	return runIP(args...) == nil
-}
-
-func removeBypassRoute(ip string) {
-	runIP("route", "del", ip+"/32")
-}
-
-// setDefaultViaTun направляет трафик по умолчанию в туннель.
-//
-// Маршрут netifd при этом НЕ удаляется: наш default получает метрику 1, а у
-// WAN-интерфейсов метрики заметно больше (на Cudy TR3000 это 10 у usb0 и
-// 300 у eth0), так что ядро и без того выберет туннель. Сосуществование
-// маршрутов вместо подмены даёт три вещи сразу:
-//
-//   - отключение сводится к удалению одной строки, восстанавливать чужой
-//     маршрут и терять при этом его атрибуты (proto static, src) не нужно;
-//   - переключение WAN (воткнули/вынули USB-модем) netifd отрабатывает сам,
-//     нам остаётся только переложить обходные маршруты;
-//   - если демон умрёт, не успев прибраться, роутер останется с рабочим
-//     маршрутом в интернет, а не без маршрута вообще.
-func setDefaultViaTun(tunName string) {
-	runIP("route", "replace", "default", "dev", tunName, "metric", "1")
-}
-
-// restoreDefaultRoute убирает наш маршрут через TUN. Маршрут WAN всё это
-// время оставался на месте, так что после удаления ядро просто вернётся к
-// нему. orig нужен лишь как страховка на случай, если default пропал по
-// не зависящим от нас причинам (например, netifd переподнимал интерфейс
-// ровно в этот момент).
-func restoreDefaultRoute(tunName string, orig defaultRoute) {
-	runIP("route", "del", "default", "dev", tunName)
-
-	if getDefaultRoute(tunName).has || !orig.has {
-		return
+		log("[ROUTE] Не удалось определить подсети %s: %v", dev, err)
+		return nil
 	}
 
-	log("[ROUTE] После отключения не осталось ни одного default — восстанавливаю %s", orig)
-	args := []string{"route", "add", "default"}
-	if orig.gateway != "" {
-		args = append(args, "via", orig.gateway)
+	var subnets []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f != "inet" || i+1 >= len(fields) {
+				continue
+			}
+			// ParseCIDR из "192.168.1.1/24" даёт сеть 192.168.1.0/24 —
+			// именно её и надо указывать в правиле.
+			if _, network, err := net.ParseCIDR(fields[i+1]); err == nil {
+				subnets = append(subnets, network.String())
+			}
+		}
 	}
-	args = append(args, "dev", orig.dev)
-	if orig.metric != "" {
-		args = append(args, "metric", orig.metric)
-	}
-	runIP(args...)
+	return subnets
 }
 
 // setupTunDevice создаёт TUN-интерфейс через ioctl(TUNSETIFF) (без PI-заголовка,

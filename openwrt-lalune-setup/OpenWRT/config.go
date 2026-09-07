@@ -46,6 +46,10 @@ type Config struct {
 	// второй цвет того же физического индикатора: гасить его совсем было
 	// бы плохо, роутер выглядел бы выключенным.
 	LedIdle string
+	// LanSubnets - подсети через запятую, трафик которых заворачивается в
+	// туннель. Пустое значение означает "определить автоматически по
+	// адресам LAN-интерфейса из uci".
+	LanSubnets string
 }
 
 func defaultConfig() Config {
@@ -130,6 +134,8 @@ func (a *App) loadConfig() {
 			a.config.Led = value
 		case "LED_IDLE":
 			a.config.LedIdle = value
+		case "LAN_SUBNETS":
+			a.config.LanSubnets = value
 		}
 	}
 
@@ -160,6 +166,7 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "SWITCH_LABEL='%s'\n", a.config.SwitchLabel)
 	fmt.Fprintf(&b, "LED='%s'\n", a.config.Led)
 	fmt.Fprintf(&b, "LED_IDLE='%s'\n", a.config.LedIdle)
+	fmt.Fprintf(&b, "LAN_SUBNETS='%s'\n", a.config.LanSubnets)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }

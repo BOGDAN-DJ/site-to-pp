@@ -9,9 +9,11 @@
 //     между ним и локальным UDP-портом ядра — это то, что на Desktop-версии
 //     делает платформенный код моста (Wintun на Windows, аналогичный кусок
 //     на Linux), но для OpenWRT никогда не было реализовано;
-//   - прокладывает host-маршруты к peer/TURN-серверам через исходный шлюз
-//     ДО переключения default route на туннель — иначе роутер после
-//     "туннель поднялся" не сможет достучаться до самого VPN-сервера;
+//   - заворачивает в туннель трафик из LAN правилами policy routing, не
+//     трогая основную таблицу маршрутизации: иначе туда попадает и трафик
+//     самого ядра, которому надо ходить на серверы авторизации VK, чтобы
+//     туннель поднять или восстановить — и он уходит в тот самый туннель,
+//     который чинит;
 //   - интегрируется с firewall4 (nftables), давая туннелю masquerade и
 //     форвардинг из lan, иначе клиенты в локальной сети не получат выход
 //     в интернет через VPN.
@@ -59,14 +61,13 @@ type App struct {
 	udpConn  *net.UDPConn
 	bridgeCh chan struct{}
 
-	origRoute defaultRoute
-	// bypassAdded - маршруты, которые демон создал сам и обязан снять при
-	// отключении. seenBypassIP шире: это все адреса, которые мы уже
-	// рассматривали, включая те, для которых маршрут не понадобился —
-	// нужен, чтобы не обрабатывать один и тот же relay-адрес повторно на
-	// каждое его упоминание в логе ядра.
-	bypassAdded  map[string]bool
-	seenBypassIP map[string]bool
+	// lanSubnets - подсети, трафик которых заворачивается в туннель
+	// правилами ip rule. Запоминаются на время подключения, чтобы снять
+	// ровно те правила, которые были добавлены.
+	lanSubnets []string
+	// lastActive - когда ядро последний раз сообщало о живых сессиях.
+	// По нему детектируется зависший туннель, см. watchdog.
+	lastActive time.Time
 
 	// led - штатные светодиоды роутера, которыми показываем состояние
 	// туннеля: активный мигает при подключении и ровно горит при поднятом
@@ -92,10 +93,8 @@ func main() {
 	log("=== LaLune OpenWrt daemon ===")
 
 	app = &App{
-		configFile:   configPath,
-		bypassAdded:  map[string]bool{},
-		seenBypassIP: map[string]bool{},
-		noiseLogged:  map[string]time.Time{},
+		configFile:  configPath,
+		noiseLogged: map[string]time.Time{},
 	}
 	app.loadConfig()
 	app.led = captureLeds(app.config.Led, app.config.LedIdle)
@@ -162,28 +161,15 @@ func (a *App) Connect() error {
 		return fmt.Errorf("конфигурация неполная: нужны PEER, PASSWORD и VK")
 	}
 
-	origRoute := getDefaultRoute(a.currentTunName())
-	if !origRoute.has {
-		log("[WARN] Не удалось определить исходный default route — обходные маршруты к серверу не будут работать корректно")
+	if underlay := getDefaultRoute(a.currentTunName()); underlay.has {
+		log("[ROUTE] Канал в интернет: %s", underlay)
 	} else {
-		log("[ROUTE] Нижележащий канал: %s", origRoute)
+		log("[WARN] Нет default route — ядру не через что достучаться до сервера")
 	}
 
-	// Запоминаем только те адреса, для которых маршрут действительно был
-	// создан: при отключении мы их удаляем, и трогать чужие маршруты,
-	// которых мы не создавали, нельзя.
-	bypassed := map[string]bool{}
-	for _, ip := range resolveHost(peerHost(cfg.Peer)) {
-		if addBypassRoute(origRoute, ip) {
-			bypassed[ip] = true
-		}
-	}
-	if cfg.TurnHost != "" {
-		for _, ip := range resolveHost(cfg.TurnHost) {
-			if addBypassRoute(origRoute, ip) {
-				bypassed[ip] = true
-			}
-		}
+	subnets := lanSubnets(cfg.LanSubnets)
+	if len(subnets) == 0 {
+		return fmt.Errorf("не удалось определить подсети LAN: заворачивать в туннель нечего")
 	}
 
 	listenPort := freePort()
@@ -200,14 +186,10 @@ func (a *App) Connect() error {
 	a.coreCmd = cmd
 	a.coreDone = done
 	a.corePID = cmd.Process.Pid
-	a.origRoute = origRoute
-	a.bypassAdded = bypassed
-	// Адреса peer/TURN уже рассмотрены — повторно их обрабатывать не нужно,
-	// даже если ядро упомянет их в логе.
-	a.seenBypassIP = map[string]bool{}
-	for ip := range bypassed {
-		a.seenBypassIP[ip] = true
-	}
+	a.lanSubnets = subnets
+	// Считаем сессии живыми на момент запуска, иначе детектор зависания
+	// сработает раньше, чем ядро успеет их поднять.
+	a.lastActive = time.Now()
 	a.mu.Unlock()
 
 	log("[INFO] Ядро запущено (PID %d), слушаю порт %d", cmd.Process.Pid, listenPort)
@@ -215,20 +197,16 @@ func (a *App) Connect() error {
 
 	tunConfCh := make(chan tunConf, 1)
 	trafficCh := make(chan struct{}, 1)
-	bypassIPCh := make(chan string, 16)
 
 	watcher := &logWatcher{
-		path:       logPath,
-		onLine:     a.logCoreLine,
-		onTunConf:  tunConfCh,
-		onTraffic:  trafficCh,
-		onBypassIP: bypassIPCh,
+		path:      logPath,
+		onLine:    a.logCoreLine,
+		onTunConf: tunConfCh,
+		onTraffic: trafficCh,
 	}
 	watchCancel := make(chan struct{})
 	go watcher.run(watchCancel)
 
-	go a.consumeBypassIPs(bypassIPCh, watchCancel)
-	go a.watchUnderlay(watchCancel)
 	go a.finishConnect(cmd, listenPort, tunConfCh, trafficCh, watchCancel)
 
 	return nil
@@ -240,8 +218,14 @@ func (a *App) Connect() error {
 // так что текущие цифры доступны без выуживания их из лога.
 func (a *App) logCoreLine(line string) {
 	if coreNoise["stats"].MatchString(line) {
+		// Отметка живых сессий нужна watchdog: по ней он отличает
+		// работающий туннель от зависшего.
+		active := activeSessions(line)
 		a.mu.Lock()
 		a.coreStats = line
+		if active > 0 {
+			a.lastActive = time.Now()
+		}
 		a.mu.Unlock()
 	}
 
@@ -262,59 +246,69 @@ func (a *App) logCoreLine(line string) {
 	log("[CORE] %s", line)
 }
 
-// watchUnderlay следит за сменой канала, через который роутер реально ходит
-// в интернет, и перекладывает обходные маршруты на новый шлюз.
-//
-// Ради чего: на Cudy TR3000 сконфигурированы два WAN — usb0 (метрика 10) и
-// eth0 (метрика 300). Воткнули USB-модем — netifd поднимает usbwan, и как
-// более приоритетный он становится нижележащим каналом. Обходные маршруты
-// к peer и TURN-серверам при этом остаются привязанными к старому шлюзу,
-// трафик до сервера CSQTT идёт в никуда, и туннель умирает — причём молча,
-// потому что сам TUN-интерфейс никуда не девается.
-//
-// Свой маршрут через туннель трогать не надо: у него метрика 1, он выигрывает
-// у любого WAN, а переключением между самими WAN занимается netifd.
-func (a *App) watchUnderlay(cancel <-chan struct{}) {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
+// finishConnect ждёт TUNCONF + первый признак трафика от ядра и только
+// после этого поднимает TUN, DNS, правила маршрутизации и firewall — ровно
+// так же, как это делают Desktop-клиенты LaLune (см. app_windows.go).
+func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunConf, trafficCh <-chan struct{}, watchCancel chan struct{}) {
+	var conf tunConf
+	hasConf, hasTraffic := false, false
+	deadline := time.After(connectTimeout)
 
-	for {
+	for !hasConf || !hasTraffic {
 		select {
-		case <-cancel:
+		case c := <-tunConfCh:
+			conf = c
+			hasConf = true
+			log("[TUN] TUNCONF получен: IP=%s DNS=%s", c.ip, c.dns)
+		case <-trafficCh:
+			hasTraffic = true
+			log("[TUN] Трафик обнаружен (Активных > 0)")
+		case <-deadline:
+			log("[TUN] Таймаут ожидания подключения — отключаюсь")
+			a.Disconnect()
 			return
-		case <-ticker.C:
-			a.mu.Lock()
-			connected := a.connected
-			prev := a.origRoute
-			tunName := a.config.Tun
-			a.mu.Unlock()
-
-			if !connected {
-				return
-			}
-
-			cur := getDefaultRoute(tunName)
-			if !cur.has || cur.sameAs(prev) {
-				continue
-			}
-
-			log("[ROUTE] Канал сменился: %s -> %s, перекладываю обходные маршруты", prev, cur)
-
-			a.mu.Lock()
-			a.origRoute = cur
-			ips := make([]string, 0, len(a.bypassAdded))
-			for ip := range a.bypassAdded {
-				ips = append(ips, ip)
-			}
-			a.mu.Unlock()
-
-			for _, ip := range ips {
-				// route replace внутри addBypassRoute перепишет
-				// существующий /32 на новый шлюз.
-				addBypassRoute(cur, ip)
-			}
+		case <-watchCancel:
+			return
 		}
 	}
+
+	ifce, err := setupTunDevice(a.currentTunName(), conf.ip, tunMTU)
+	if err != nil {
+		log("[TUN] Ошибка настройки TUN: %v", err)
+		a.Disconnect()
+		return
+	}
+
+	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listenPort})
+	if err != nil {
+		log("[TUN] Ошибка подключения к ядру по UDP: %v", err)
+		ifce.Close()
+		a.Disconnect()
+		return
+	}
+
+	a.mu.Lock()
+	subnets := a.lanSubnets
+	a.mu.Unlock()
+
+	appendResolvConf(conf.dns)
+	setTunnelPolicyRoutes(ifce.Name(), subnets)
+	firewallUp(ifce.Name())
+
+	bridgeCh := make(chan struct{})
+
+	a.mu.Lock()
+	a.ifce = ifce
+	a.udpConn = udpConn
+	a.bridgeCh = bridgeCh
+	a.tunUp = true
+	a.mu.Unlock()
+
+	log("[TUN] Туннель поднят: %s %s/32, в туннель идёт %v", ifce.Name(), conf.ip, subnets)
+	a.led.tunnelUp()
+
+	bridgeTunUDP(ifce, udpConn, bridgeCh)
+	log("[TUN] Мост TUN<->UDP остановлен")
 }
 
 // shouldAutoConnect решает, поднимать ли туннель на старте демона.
@@ -369,97 +363,6 @@ func (a *App) autoConnect() {
 	log("[AUTO] За 2 минуты после старта интернет так и не появился — автоподключение отменено")
 }
 
-func (a *App) consumeBypassIPs(ch <-chan string, cancel <-chan struct{}) {
-	for {
-		select {
-		case <-cancel:
-			return
-		case ip := <-ch:
-			a.mu.Lock()
-			already := a.seenBypassIP[ip]
-			if !already {
-				a.seenBypassIP[ip] = true
-			}
-			orig := a.origRoute
-			a.mu.Unlock()
-			if already {
-				continue
-			}
-			log("[ROUTE] Обходной маршрут для relay/TURN %s", ip)
-			// В bypassAdded попадают только реально созданные маршруты —
-			// их и только их снимает Disconnect. Отдельный seenBypassIP
-			// нужен, чтобы не дёргать ip route на каждое повторное
-			// упоминание адреса в логе ядра.
-			if addBypassRoute(orig, ip) {
-				a.mu.Lock()
-				a.bypassAdded[ip] = true
-				a.mu.Unlock()
-			}
-		}
-	}
-}
-
-// finishConnect ждёт TUNCONF + первый признак трафика от ядра и только
-// после этого поднимает TUN, DNS, default route и firewall — ровно так же,
-// как это делают Desktop-клиенты LaLune (см. app_windows.go/app_linux.go).
-func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunConf, trafficCh <-chan struct{}, watchCancel chan struct{}) {
-	var conf tunConf
-	hasConf, hasTraffic := false, false
-	deadline := time.After(connectTimeout)
-
-	for !hasConf || !hasTraffic {
-		select {
-		case c := <-tunConfCh:
-			conf = c
-			hasConf = true
-			log("[TUN] TUNCONF получен: IP=%s DNS=%s", c.ip, c.dns)
-		case <-trafficCh:
-			hasTraffic = true
-			log("[TUN] Трафик обнаружен (Активных > 0)")
-		case <-deadline:
-			log("[TUN] Таймаут ожидания подключения — отключаюсь")
-			a.Disconnect()
-			return
-		case <-watchCancel:
-			return
-		}
-	}
-
-	ifce, err := setupTunDevice(a.currentTunName(), conf.ip, tunMTU)
-	if err != nil {
-		log("[TUN] Ошибка настройки TUN: %v", err)
-		a.Disconnect()
-		return
-	}
-
-	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listenPort})
-	if err != nil {
-		log("[TUN] Ошибка подключения к ядру по UDP: %v", err)
-		ifce.Close()
-		a.Disconnect()
-		return
-	}
-
-	appendResolvConf(conf.dns)
-	setDefaultViaTun(ifce.Name())
-	firewallUp(ifce.Name())
-
-	bridgeCh := make(chan struct{})
-
-	a.mu.Lock()
-	a.ifce = ifce
-	a.udpConn = udpConn
-	a.bridgeCh = bridgeCh
-	a.tunUp = true
-	a.mu.Unlock()
-
-	log("[TUN] Туннель поднят: %s %s/32, default route -> %s", ifce.Name(), conf.ip, ifce.Name())
-	a.led.tunnelUp()
-
-	bridgeTunUDP(ifce, udpConn, bridgeCh)
-	log("[TUN] Мост TUN<->UDP остановлен")
-}
-
 func (a *App) currentTunName() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -479,8 +382,7 @@ func (a *App) Disconnect() bool {
 	ifce := a.ifce
 	udpConn := a.udpConn
 	bridgeCh := a.bridgeCh
-	origRoute := a.origRoute
-	bypassed := a.bypassAdded
+	subnets := a.lanSubnets
 	tunUp := a.tunUp
 
 	a.connected = false
@@ -491,8 +393,7 @@ func (a *App) Disconnect() bool {
 	a.ifce = nil
 	a.udpConn = nil
 	a.bridgeCh = nil
-	a.bypassAdded = map[string]bool{}
-	a.seenBypassIP = map[string]bool{}
+	a.lanSubnets = nil
 	a.mu.Unlock()
 
 	log("[INFO] Отключение...")
@@ -506,13 +407,12 @@ func (a *App) Disconnect() bool {
 
 	if tunUp {
 		firewallDown()
-		restoreDefaultRoute(ifce.Name(), origRoute)
+		// Основную таблицу маршрутизации мы не трогали, поэтому
+		// восстанавливать в ней нечего: достаточно снять свои правила.
+		clearTunnelPolicyRoutes(subnets)
 	}
 	if ifce != nil {
 		ifce.Close()
-	}
-	for ip := range bypassed {
-		removeBypassRoute(ip)
 	}
 
 	if cmd != nil && cmd.Process != nil {
@@ -526,8 +426,22 @@ func (a *App) Disconnect() bool {
 	return true
 }
 
-// watchdog перезапускает подключение, если процесс ядра неожиданно умер
-// после того, как туннель уже был поднят (например, сервер разорвал сессию).
+// Сколько ядро может держать "Активных: 0", прежде чем считать туннель
+// зависшим. Полторы минуты с запасом перекрывают обычное переподключение
+// сессий, но не заставляют ждать слишком долго.
+const staleTunnelTimeout = 90 * time.Second
+
+// watchdog перезапускает подключение в двух случаях:
+//
+//   - процесс ядра неожиданно завершился;
+//   - ядро живо, но давно не сообщало ни об одной активной сессии.
+//
+// Второй случай пришлось добавить после того, как туннель на живом роутере
+// молча умер и не поднялся: ядро осталось в памяти и бесконечно крутило
+// попытки авторизации, а смерть процесса — единственное, что watchdog умел
+// замечать раньше. Само по себе это не должно больше происходить (трафик
+// ядра теперь не заворачивается в туннель, см. tunnel.go), но зависнуть
+// туннель может и по другим причинам — сервер перезапустили, связь моргнула.
 func (a *App) watchdog() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -536,6 +450,8 @@ func (a *App) watchdog() {
 		a.mu.Lock()
 		connected := a.connected
 		done := a.coreDone
+		tunUp := a.tunUp
+		idle := time.Since(a.lastActive)
 		a.mu.Unlock()
 
 		if !connected || done == nil {
@@ -544,15 +460,25 @@ func (a *App) watchdog() {
 
 		select {
 		case <-done:
-			log("[WATCHDOG] Ядро завершилось, переподключаюсь...")
-			a.Disconnect()
-			time.Sleep(2 * time.Second)
-			if err := a.Connect(); err != nil {
-				log("[WATCHDOG] Переподключение не удалось: %v", err)
-			}
+			a.reconnect("ядро завершилось")
+			continue
 		default:
-			// процесс жив, ничего не делаем
 		}
+
+		// Пока туннель ещё поднимается, сессий закономерно нет — за этим
+		// следит собственный таймаут finishConnect.
+		if tunUp && idle > staleTunnelTimeout {
+			a.reconnect(fmt.Sprintf("нет активных сессий уже %s", idle.Truncate(time.Second)))
+		}
+	}
+}
+
+func (a *App) reconnect(reason string) {
+	log("[WATCHDOG] %s, переподключаюсь...", reason)
+	a.Disconnect()
+	time.Sleep(2 * time.Second)
+	if err := a.Connect(); err != nil {
+		log("[WATCHDOG] Переподключение не удалось: %v", err)
 	}
 }
 

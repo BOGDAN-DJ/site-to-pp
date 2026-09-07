@@ -105,13 +105,26 @@ func coreNoiseClass(line string) string {
 }
 
 var (
-	reTunConf  = regexp.MustCompile(`Tunnel IP:\s*([\d.]+)(?:/\d+)?\s*\|\s*DNS:\s*([\d.,\s]+)`)
-	reListen   = regexp.MustCompile(`Слушаю:\s*127\.0\.0\.1:(\d+)`)
-	reActive   = regexp.MustCompile(`Активных:\s*(\d+)`)
-	reIPv4     = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
-	reFatal    = regexp.MustCompile(`\[ФАТАЛ\]|\[PANIC\]`)
-	reTurnLine = regexp.MustCompile(`TURN|Relay|Relay-адрес`)
+	reTunConf = regexp.MustCompile(`Tunnel IP:\s*([\d.]+)(?:/\d+)?\s*\|\s*DNS:\s*([\d.,\s]+)`)
+	reListen  = regexp.MustCompile(`Слушаю:\s*127\.0\.0\.1:(\d+)`)
+	reActive  = regexp.MustCompile(`Активных:\s*(\d+)`)
+	reFatal   = regexp.MustCompile(`\[ФАТАЛ\]|\[PANIC\]`)
 )
+
+// activeSessions вытаскивает число живых сессий из строки статистики
+// ("[СТАТИСТИКА] Активных: 18 | Трафик: ..."). Возвращает -1, если строка
+// не о том.
+func activeSessions(line string) int {
+	m := reActive.FindStringSubmatch(line)
+	if m == nil {
+		return -1
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return -1
+	}
+	return n
+}
 
 // tunConf - результат разбора строки "Tunnel IP: X | DNS: Y" из лога ядра.
 type tunConf struct {
@@ -122,12 +135,11 @@ type tunConf struct {
 // logWatcher инкрементально читает лог-файл ядра и рассылает найденные
 // события в предоставленные каналы. Останавливается по cancel.
 type logWatcher struct {
-	path       string
-	offset     int64
-	onLine     func(line string)
-	onTunConf  chan<- tunConf
-	onTraffic  chan<- struct{}
-	onBypassIP chan<- string
+	path      string
+	offset    int64
+	onLine    func(line string)
+	onTunConf chan<- tunConf
+	onTraffic chan<- struct{}
 }
 
 func (w *logWatcher) run(cancel <-chan struct{}) {
@@ -197,15 +209,6 @@ func (w *logWatcher) handleLine(line string) {
 		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
 			select {
 			case w.onTraffic <- struct{}{}:
-			default:
-			}
-		}
-	}
-
-	if reTurnLine.MatchString(line) {
-		for _, ip := range reIPv4.FindAllString(line, -1) {
-			select {
-			case w.onBypassIP <- ip:
 			default:
 			}
 		}
