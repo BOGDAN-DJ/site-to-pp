@@ -45,10 +45,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Установить Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: ${{ env.SETUP_DIR }}/OpenWRT/go.sum
@@ -176,7 +176,7 @@ jobs:
           echo "Конфиг пуст, как и задумано."
 
       - name: Опубликовать артефакт
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openwrt-csqtt-${{ github.event.inputs.openwrt_release }}-${{ github.event.inputs.profile }}
           path: |
