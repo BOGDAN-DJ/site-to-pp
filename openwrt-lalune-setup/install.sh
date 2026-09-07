@@ -69,6 +69,11 @@ ssh "$ROUTER" '[ -x /etc/init.d/csqtt ] && /etc/init.d/csqtt stop 2>/dev/null; m
 $SCP "$DAEMON_BIN" "$ROUTER:/usr/sbin/csqtt-daemon"
 $SCP "$FILES_DIR/csqtt.init" "$ROUTER:/etc/init.d/csqtt"
 
+# Обработчик кнопки "mode" (BTN_0). Кнопку reset не трогаем — она нужна
+# для failsafe.
+$SCP "$FILES_DIR/csqtt.button" "$ROUTER:/etc/rc.button/BTN_0"
+ssh "$ROUTER" 'chmod +x /etc/rc.button/BTN_0'
+
 if [ -n "$CORE_BIN" ]; then
 	if [ ! -f "$CORE_BIN" ]; then
 		echo "Не найден бинарник ядра: $CORE_BIN" >&2

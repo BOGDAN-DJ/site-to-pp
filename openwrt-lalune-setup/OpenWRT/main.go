@@ -84,8 +84,16 @@ func main() {
 	}
 	app.loadConfig()
 
+	// Зона csqtt могла пережить жёсткую перезагрузку — см. clearStaleFirewall.
+	clearStaleFirewall()
+
 	go app.watchdog()
 	go app.startAPI()
+
+	if app.config.AutoConnect {
+		log("[AUTO] AUTOCONNECT включён, жду готовности сети")
+		go app.autoConnect()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -133,9 +141,11 @@ func (a *App) Connect() error {
 		return fmt.Errorf("конфигурация неполная: нужны PEER, PASSWORD и VK")
 	}
 
-	origRoute := getDefaultRoute()
+	origRoute := getDefaultRoute(a.currentTunName())
 	if !origRoute.has {
 		log("[WARN] Не удалось определить исходный default route — обходные маршруты к серверу не будут работать корректно")
+	} else {
+		log("[ROUTE] Нижележащий канал: %s", origRoute)
 	}
 
 	// Запоминаем только те адреса, для которых маршрут действительно был
@@ -196,9 +206,86 @@ func (a *App) Connect() error {
 	go watcher.run(watchCancel)
 
 	go a.consumeBypassIPs(bypassIPCh, watchCancel)
+	go a.watchUnderlay(watchCancel)
 	go a.finishConnect(cmd, listenPort, tunConfCh, trafficCh, watchCancel)
 
 	return nil
+}
+
+// watchUnderlay следит за сменой канала, через который роутер реально ходит
+// в интернет, и перекладывает обходные маршруты на новый шлюз.
+//
+// Ради чего: на Cudy TR3000 сконфигурированы два WAN — usb0 (метрика 10) и
+// eth0 (метрика 300). Воткнули USB-модем — netifd поднимает usbwan, и как
+// более приоритетный он становится нижележащим каналом. Обходные маршруты
+// к peer и TURN-серверам при этом остаются привязанными к старому шлюзу,
+// трафик до сервера CSQTT идёт в никуда, и туннель умирает — причём молча,
+// потому что сам TUN-интерфейс никуда не девается.
+//
+// Свой маршрут через туннель трогать не надо: у него метрика 1, он выигрывает
+// у любого WAN, а переключением между самими WAN занимается netifd.
+func (a *App) watchUnderlay(cancel <-chan struct{}) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cancel:
+			return
+		case <-ticker.C:
+			a.mu.Lock()
+			connected := a.connected
+			prev := a.origRoute
+			tunName := a.config.Tun
+			a.mu.Unlock()
+
+			if !connected {
+				return
+			}
+
+			cur := getDefaultRoute(tunName)
+			if !cur.has || cur.sameAs(prev) {
+				continue
+			}
+
+			log("[ROUTE] Канал сменился: %s -> %s, перекладываю обходные маршруты", prev, cur)
+
+			a.mu.Lock()
+			a.origRoute = cur
+			ips := make([]string, 0, len(a.bypassAdded))
+			for ip := range a.bypassAdded {
+				ips = append(ips, ip)
+			}
+			a.mu.Unlock()
+
+			for _, ip := range ips {
+				// route replace внутри addBypassRoute перепишет
+				// существующий /32 на новый шлюз.
+				addBypassRoute(cur, ip)
+			}
+		}
+	}
+}
+
+// autoConnect поднимает туннель при старте демона, если это включено в
+// конфиге. Ждём появления default route: procd запускает нас на S95, но
+// DHCP на WAN к этому моменту может быть ещё не отработан, а без маршрута
+// до сервера подключаться бессмысленно.
+func (a *App) autoConnect() {
+	deadline := time.Now().Add(2 * time.Minute)
+
+	for time.Now().Before(deadline) {
+		if getDefaultRoute(a.currentTunName()).has {
+			log("[AUTO] Сеть готова, подключаюсь")
+			if err := a.Connect(); err != nil {
+				log("[AUTO] Не удалось подключиться: %v", err)
+			}
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	log("[AUTO] За 2 минуты после старта интернет так и не появился — автоподключение отменено")
 }
 
 func (a *App) consumeBypassIPs(ch <-chan string, cancel <-chan struct{}) {
@@ -458,6 +545,26 @@ func (a *App) startAPI() {
 
 	mux.HandleFunc("/api/disconnect", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"success": a.Disconnect()})
+	})
+
+	// /api/toggle - для физической кнопки на роутере: решение о том, что
+	// делать, принимается здесь под тем же мьютексом, что и само действие.
+	// Если бы кнопка сначала спрашивала /api/status, а потом дёргала
+	// connect или disconnect, между двумя запросами состояние могло бы
+	// смениться (нажали дважды подряд, сработал watchdog).
+	mux.HandleFunc("/api/toggle", func(w http.ResponseWriter, r *http.Request) {
+		if a.IsConnected() {
+			a.Disconnect()
+			writeJSON(w, map[string]interface{}{"success": true, "action": "disconnected"})
+			return
+		}
+		err := a.Connect()
+		resp := map[string]interface{}{"success": err == nil, "action": "connected"}
+		if err != nil {
+			resp["action"] = "failed"
+			resp["error"] = err.Error()
+		}
+		writeJSON(w, resp)
 	})
 
 	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {

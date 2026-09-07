@@ -7,16 +7,23 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/songgao/water"
 )
 
-// defaultRoute - маршрут по умолчанию, существовавший на роутере до
-// подключения CSQTT. Сохраняется, чтобы: а) проложить обходные маршруты для
-// peer/TURN до переключения шлюза, б) корректно откатить default route при
-// отключении, вместо того чтобы оставить роутер без интернета.
+// defaultRoute - «нижележащий» маршрут по умолчанию, то есть тот, которым
+// роутер ходит в интернет помимо туннеля. Нужен, чтобы прокладывать через
+// него обходные маршруты к peer/TURN: сам туннель поднимается через сервер,
+// до которого надо как-то добраться, и заворачивать этот трафик в туннель
+// нельзя.
+//
+// На роутерах с несколькими WAN (у Cudy TR3000 это usb0 с метрикой 10 и
+// eth0 с метрикой 300) такой маршрут меняется на ходу — модем воткнули,
+// модем вынули. Поэтому он не снимается один раз при подключении, а
+// перечитывается: см. watchUnderlay в main.go.
 type defaultRoute struct {
 	has     bool
 	gateway string
@@ -24,22 +31,62 @@ type defaultRoute struct {
 	metric  string
 }
 
+func (r defaultRoute) sameAs(o defaultRoute) bool {
+	return r.has == o.has && r.gateway == o.gateway && r.dev == o.dev
+}
+
+func (r defaultRoute) String() string {
+	if !r.has {
+		return "(нет)"
+	}
+	if r.gateway == "" {
+		return "dev " + r.dev
+	}
+	return "via " + r.gateway + " dev " + r.dev
+}
+
 var reDefaultRoute = regexp.MustCompile(`^default\s+(?:via\s+(\S+)\s+)?dev\s+(\S+)(?:.*?\bmetric\s+(\d+))?`)
 
-func getDefaultRoute() defaultRoute {
+// getDefaultRoute возвращает лучший default route, игнорируя маршрут через
+// excludeDev (передаём туда имя TUN, чтобы не принять собственный маршрут
+// за нижележащий) .
+//
+// Выбираем именно наименьшую метрику, а не первую попавшуюся строку: при
+// нескольких активных WAN в выводе несколько default-маршрутов, и ядро
+// пользуется тем, у которого метрика меньше. Строки `ip route show`
+// отсортированы по метрике, но полагаться на это не стоит — маршрут без
+// метрики (т.е. metric 0) может оказаться где угодно.
+func getDefaultRoute(excludeDev string) defaultRoute {
 	out, err := exec.Command("ip", "-4", "route", "show", "default").Output()
 	if err != nil {
 		return defaultRoute{}
 	}
+
+	best := defaultRoute{}
+	bestMetric := -1
+
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		m := reDefaultRoute.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		return defaultRoute{has: true, gateway: m[1], dev: m[2], metric: m[3]}
+		if excludeDev != "" && m[2] == excludeDev {
+			continue
+		}
+
+		metric := 0
+		if m[3] != "" {
+			if v, err := strconv.Atoi(m[3]); err == nil {
+				metric = v
+			}
+		}
+		if bestMetric == -1 || metric < bestMetric {
+			best = defaultRoute{has: true, gateway: m[1], dev: m[2], metric: m[3]}
+			bestMetric = metric
+		}
 	}
-	return defaultRoute{}
+	return best
 }
 
 // runIP выполняет `ip ...` и логирует неуспешные команды (но не прерывает
@@ -109,22 +156,36 @@ func removeBypassRoute(ip string) {
 	runIP("route", "del", ip+"/32")
 }
 
-// setDefaultViaTun переключает маршрут по умолчанию на TUN-интерфейс.
-// Существовавший default удаляется явно (а не заменяется по metric), потому
-// что "ip route replace" не гарантированно попадёт в тот же route-selector,
-// если метрика/шлюз отличаются.
+// setDefaultViaTun направляет трафик по умолчанию в туннель.
+//
+// Маршрут netifd при этом НЕ удаляется: наш default получает метрику 1, а у
+// WAN-интерфейсов метрики заметно больше (на Cudy TR3000 это 10 у usb0 и
+// 300 у eth0), так что ядро и без того выберет туннель. Сосуществование
+// маршрутов вместо подмены даёт три вещи сразу:
+//
+//   - отключение сводится к удалению одной строки, восстанавливать чужой
+//     маршрут и терять при этом его атрибуты (proto static, src) не нужно;
+//   - переключение WAN (воткнули/вынули USB-модем) netifd отрабатывает сам,
+//     нам остаётся только переложить обходные маршруты;
+//   - если демон умрёт, не успев прибраться, роутер останется с рабочим
+//     маршрутом в интернет, а не без маршрута вообще.
 func setDefaultViaTun(tunName string) {
-	runIP("route", "del", "default")
-	runIP("route", "add", "default", "dev", tunName, "metric", "1")
+	runIP("route", "replace", "default", "dev", tunName, "metric", "1")
 }
 
-// restoreDefaultRoute убирает маршрут через TUN и, если до подключения
-// существовал другой default, восстанавливает именно его.
+// restoreDefaultRoute убирает наш маршрут через TUN. Маршрут WAN всё это
+// время оставался на месте, так что после удаления ядро просто вернётся к
+// нему. orig нужен лишь как страховка на случай, если default пропал по
+// не зависящим от нас причинам (например, netifd переподнимал интерфейс
+// ровно в этот момент).
 func restoreDefaultRoute(tunName string, orig defaultRoute) {
 	runIP("route", "del", "default", "dev", tunName)
-	if !orig.has {
+
+	if getDefaultRoute(tunName).has || !orig.has {
 		return
 	}
+
+	log("[ROUTE] После отключения не осталось ни одного default — восстанавливаю %s", orig)
 	args := []string{"route", "add", "default"}
 	if orig.gateway != "" {
 		args = append(args, "via", orig.gateway)
@@ -246,6 +307,26 @@ func firewallDown() {
 	uci("delete", "firewall.csqtt")
 	uci("commit", "firewall")
 	reloadFirewall()
+}
+
+// clearStaleFirewall убирает зону csqtt, оставшуюся в /etc/config/firewall
+// от прошлого запуска.
+//
+// firewallUp вынужден делать `uci commit`, иначе fw4 не увидит новую зону,
+// а commit пишет на диск. Поэтому после жёсткой перезагрузки (питание
+// выдернули, паника ядра) зона переживает ребут и ссылается на csqtt0,
+// которого больше нет. Само по себе это не ломает firewall — fw4 такую
+// зону просто игнорирует, — но оставлять мусор и, что хуже, разрешение
+// форвардинга lan -> csqtt в конфиге не стоит.
+//
+// Вызывается один раз при старте демона, до всякого подключения.
+func clearStaleFirewall() {
+	out, err := exec.Command("uci", "-q", "get", "firewall.csqtt").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return
+	}
+	log("[FW] Найдена зона csqtt от прошлого запуска — убираю")
+	firewallDown()
 }
 
 func uci(args ...string) {

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Переключение туннеля CSQTT физической кнопкой роутера.
+#
+# Ставится в /etc/rc.button/BTN_0 — на Cudy TR3000 это кнопка "mode"
+# (в devicetree gpio-keys/mode, linux,code = 0x100 = BTN_0). Кнопку reset
+# намеренно не трогаем: она нужна для failsafe, и переопределять её —
+# значит лишиться единственного способа вернуть роутер к жизни, если
+# что-то пойдёт не так.
+#
+# procd вызывает этот скрипт с переменными ACTION (pressed/released) и
+# SEEN (сколько секунд кнопку держали).
+
+[ "$ACTION" = "released" ] || exit 0
+
+# Реагируем только на короткое нажатие. Длинное удержание оставляем в
+# покое: за ним обычно закреплены штатные функции прошивки, и перехватывать
+# их не наше дело.
+[ "${SEEN:-0}" -le 2 ] || exit 0
+
+STATE_LED=/sys/class/leds/white:status
+
+blink() {
+	[ -d "$STATE_LED" ] || return 0
+	n=$1
+	while [ "$n" -gt 0 ]; do
+		echo 1 > "$STATE_LED/brightness" 2>/dev/null
+		usleep 120000
+		echo 0 > "$STATE_LED/brightness" 2>/dev/null
+		usleep 120000
+		n=$((n - 1))
+	done
+}
+
+RESP="$(curl -s --max-time 90 -X POST http://127.0.0.1:8080/api/toggle 2>/dev/null)"
+
+case "$RESP" in
+	*'"action":"connected"'*)
+		logger -t csqtt-button "туннель включён кнопкой"
+		blink 2
+		;;
+	*'"action":"disconnected"'*)
+		logger -t csqtt-button "туннель выключен кнопкой"
+		blink 1
+		;;
+	*)
+		logger -t csqtt-button "не удалось переключить туннель: ${RESP:-нет ответа от демона}"
+		blink 5
+		;;
+esac
+
+exit 0

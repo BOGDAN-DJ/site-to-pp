@@ -25,6 +25,11 @@ type Config struct {
 	TurnHost    string
 	TurnPort    string
 	Tun         string
+	// AutoConnect - поднимать туннель сразу при старте демона (то есть и
+	// после перезагрузки роутера). Выключено по умолчанию: пока туннель не
+	// проверен, полезно, чтобы ребут гарантированно возвращал роутер в
+	// заведомо рабочее состояние.
+	AutoConnect bool
 }
 
 func defaultConfig() Config {
@@ -93,6 +98,9 @@ func (a *App) loadConfig() {
 			if value != "" {
 				a.config.Tun = value
 			}
+		case "AUTOCONNECT":
+			a.config.AutoConnect = value == "1" || strings.EqualFold(value, "true") ||
+				strings.EqualFold(value, "yes")
 		}
 	}
 
@@ -119,6 +127,11 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "TURN_HOST='%s'\n", a.config.TurnHost)
 	fmt.Fprintf(&b, "TURN_PORT='%s'\n", a.config.TurnPort)
 	fmt.Fprintf(&b, "TUN='%s'\n", a.config.Tun)
+	autoconnect := "0"
+	if a.config.AutoConnect {
+		autoconnect = "1"
+	}
+	fmt.Fprintf(&b, "AUTOCONNECT='%s'\n", autoconnect)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }
