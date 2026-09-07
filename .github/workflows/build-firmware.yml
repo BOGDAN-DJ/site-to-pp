@@ -1,0 +1,215 @@
+# Собирает образ прошивки OpenWrt для Cudy TR3000 с уже вшитой установкой
+# LaLune/CSQTT: демон, ядро, glibc-прослойка, init-скрипт, обработчик
+# переключателя и нужные пакеты.
+#
+# Восстановление после этого — обычная прошивка одним файлом, без отдельного
+# шага восстановления: роутер поднимается уже настроенным.
+#
+# КЛЮЧИ ПОДКЛЮЧЕНИЯ В ОБРАЗ НЕ ПОПАДАЮТ. Репозиторий публичный, артефакты
+# сборки доступны кому угодно, поэтому /etc/csqtt/csqtt.conf кладётся
+# шаблоном с пустыми PEER/PASSWORD/VK. После прошивки ссылка csqtt://
+# вставляется в веб-панели роутера (http://192.168.1.1:8080/) — это одно
+# действие, зато секреты никогда не покидают вашу сеть.
+#
+# Запускается только вручную (workflow_dispatch): это не часть CI сайта, а
+# отдельная утилита.
+
+name: Firmware image (Cudy TR3000)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_release:
+        description: "Версия OpenWrt (должна совпадать с той, что стоит на роутере)"
+        required: true
+        default: "25.12.5"
+      profile:
+        description: "Профиль устройства"
+        required: true
+        default: "cudy_tr3000-256mb-v1"
+      target:
+        description: "Таргет OpenWrt"
+        required: true
+        default: "mediatek/filogic"
+
+permissions:
+  contents: read
+
+env:
+  SETUP_DIR: openwrt-lalune-setup
+
+jobs:
+  build:
+    name: Собрать образ
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Установить Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: ${{ env.SETUP_DIR }}/OpenWRT/go.sum
+
+      - name: Собрать демон под aarch64
+        working-directory: ${{ env.SETUP_DIR }}/OpenWRT
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w" -o /tmp/csqtt-daemon .
+          file /tmp/csqtt-daemon
+
+      - name: Скачать ядро csqtt-client
+        run: |
+          curl -fsSL -o /tmp/csqtt-client-glibc \
+            https://github.com/Endlad2/csqtt-core/releases/latest/download/client-linux-arm64
+          file /tmp/csqtt-client-glibc
+
+      # Релизы csqtt-core собраны под glibc (нужны символы вплоть до
+      # GLIBC_2.38), а OpenWrt — musl. Пока апстрим не собирает musl-таргет,
+      # кладём рядом собственный загрузчик и libc из Debian и запускаем ядро
+      # через них. Подробности — в README, раздел «glibc vs musl».
+      - name: Собрать glibc-прослойку
+        run: |
+          mkdir -p /tmp/glibc
+          cd /tmp
+          curl -fsSL -O http://ftp.debian.org/debian/pool/main/g/glibc/libc6_2.41-12+deb13u4_arm64.deb
+          curl -fsSL -O http://ftp.debian.org/debian/pool/main/g/gcc-14/libgcc-s1_14.2.0-19_arm64.deb
+          for d in libc6_*.deb libgcc-s1_*.deb; do
+            dpkg-deb -x "$d" /tmp/debroot
+          done
+          LIB=/tmp/debroot/usr/lib/aarch64-linux-gnu
+          for f in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 \
+                   libdl.so.2 libpthread.so.0 librt.so.1 \
+                   libresolv.so.2 libnss_dns.so.2 libnss_files.so.2 \
+                   libgcc_s.so.1; do
+            cp -a "$LIB/$f" /tmp/glibc/
+          done
+          ls -la /tmp/glibc
+
+      - name: Собрать дерево файлов для образа
+        run: |
+          FILES=/tmp/files
+          mkdir -p $FILES/usr/sbin $FILES/usr/bin $FILES/opt/glibc $FILES/opt/csqtt \
+                   $FILES/etc/init.d $FILES/etc/rc.button $FILES/etc/csqtt
+
+          install -m 0755 /tmp/csqtt-daemon        $FILES/usr/sbin/csqtt-daemon
+          install -m 0755 /tmp/csqtt-client-glibc  $FILES/opt/csqtt/csqtt-client-glibc
+          cp -a /tmp/glibc/.                       $FILES/opt/glibc/
+          chmod +x $FILES/opt/glibc/ld-linux-aarch64.so.1
+
+          install -m 0755 $SETUP_DIR/OpenWRT/files/csqtt.init   $FILES/etc/init.d/csqtt
+          install -m 0755 $SETUP_DIR/OpenWRT/files/csqtt.button $FILES/etc/rc.button/BTN_0
+
+          # Обёртка, запускающая ядро через собственный загрузчик glibc.
+          # Лежит отдельным файлом, а не пишется здесь heredoc-ом: внутри
+          # YAML-блока отступы не срезаются, и "#!/bin/sh" оказался бы не в
+          # первой колонке — shebang бы не сработал.
+          install -m 0755 $SETUP_DIR/OpenWRT/files/csqtt-client.wrapper \
+                          $FILES/usr/bin/csqtt-client
+
+          # Конфиг БЕЗ ключей подключения: их вводят ссылкой в веб-панели
+          # после прошивки. Права 600 — файл готов принять пароль.
+          install -m 0600 $SETUP_DIR/OpenWRT/files/csqtt.conf.example \
+                          $FILES/etc/csqtt/csqtt.conf
+
+          # В образе включаем управление переключателем: это проверенная на
+          # железе конфигурация, и после прошивки роутер сразу ведёт себя
+          # ожидаемо — положение тумблера задаёт состояние туннеля.
+          #
+          # До ввода ключей автоподключение будет отваливаться с
+          # «конфигурация неполная» — это одна строка в логе и ничего не
+          # ломает. В csqtt.conf.example по умолчанию стоит '0' намеренно:
+          # там это безопасный дефолт для ручной установки.
+          sed -i "s/^AUTOCONNECT=.*/AUTOCONNECT='switch'/" \
+                 $FILES/etc/csqtt/csqtt.conf
+          grep -E "^(AUTOCONNECT|PEER|PASSWORD|VK)=" $FILES/etc/csqtt/csqtt.conf
+
+          # Чтобы будущие обновления прошивки не стирали то, что
+          # восстановить неоткуда.
+          mkdir -p $FILES/etc
+          printf '%s\n' /etc/csqtt/csqtt.conf /etc/rc.button/BTN_0 \
+            > $FILES/etc/sysupgrade.conf
+
+          # Сервис должен подниматься сам после прошивки.
+          mkdir -p $FILES/etc/rc.d
+          ln -sf ../init.d/csqtt $FILES/etc/rc.d/S95csqtt
+          ln -sf ../init.d/csqtt $FILES/etc/rc.d/K10csqtt
+
+          echo "=== дерево ==="
+          find $FILES -type f -o -type l | sort
+          du -sh $FILES
+
+      - name: Скачать Image Builder
+        run: |
+          TARGET_PATH="${{ github.event.inputs.target }}"
+          TARGET_NAME="${TARGET_PATH//\//-}"
+          URL="https://downloads.openwrt.org/releases/${{ github.event.inputs.openwrt_release }}/targets/${TARGET_PATH}/openwrt-imagebuilder-${{ github.event.inputs.openwrt_release }}-${TARGET_NAME}.Linux-x86_64.tar.zst"
+          echo "Скачиваю $URL"
+          curl -fsSL -o /tmp/ib.tar.zst "$URL"
+          mkdir -p /tmp/ib
+          tar --zstd -xf /tmp/ib.tar.zst -C /tmp/ib --strip-components=1
+          ls /tmp/ib
+
+      - name: Собрать образ
+        working-directory: /tmp/ib
+        run: |
+          make image \
+            PROFILE="${{ github.event.inputs.profile }}" \
+            PACKAGES="kmod-tun curl" \
+            FILES="/tmp/files"
+          echo "=== получилось ==="
+          ls -la bin/targets/*/*/
+
+      - name: Проверить, что ключи не утекли в образ
+        working-directory: /tmp/ib
+        run: |
+          # Страховка от собственной ошибки: если в образе вдруг окажется
+          # непустой PEER/PASSWORD/VK, сборку надо валить, а не публиковать
+          # артефакт с чужими секретами в публичном репозитории.
+          if grep -rqE "^(PASSWORD|VK|PEER)='.+'" /tmp/files/etc/csqtt/csqtt.conf; then
+            echo "В конфиг попали ключи подключения — сборка остановлена." >&2
+            grep -nE "^(PASSWORD|VK|PEER)=" /tmp/files/etc/csqtt/csqtt.conf >&2
+            exit 1
+          fi
+          echo "Конфиг пуст, как и задумано."
+
+      - name: Опубликовать артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-csqtt-${{ github.event.inputs.openwrt_release }}-${{ github.event.inputs.profile }}
+          path: |
+            /tmp/ib/bin/targets/*/*/*sysupgrade.bin
+            /tmp/ib/bin/targets/*/*/*factory.bin
+            /tmp/ib/bin/targets/*/*/sha256sums
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Что делать с образом
+        run: |
+          cat <<'EOF'
+          ================================================================
+          Образ собран. Дальше:
+
+          1. Скачайте артефакт и возьмите файл *-sysupgrade.bin
+          2. Прошейте:
+
+               scp -O openwrt-*-sysupgrade.bin root@192.168.1.1:/tmp/
+               ssh root@192.168.1.1 'sysupgrade -v /tmp/openwrt-*-sysupgrade.bin'
+
+             Настройки сети при этом сохраняются. Чтобы получить чистый
+             роутер с нуля, добавьте -n (тогда и LAN-адрес станет
+             стандартным 192.168.1.1).
+
+          3. После перезагрузки откройте http://192.168.1.1:8080/ и
+             вставьте ссылку csqtt://connect?... — ключи в образ намеренно
+             не вшиты.
+
+          4. Переведите переключатель "mode" в положение "включено".
+
+          ВАЖНО: версия OpenWrt в образе должна совпадать с той, для которой
+          снимался overlay-бэкап, если планируете его накатывать: пакеты
+          kmod-* привязаны к версии ядра.
+          ================================================================
+          EOF
