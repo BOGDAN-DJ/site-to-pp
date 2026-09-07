@@ -309,6 +309,56 @@ func firewallDown() {
 	reloadFirewall()
 }
 
+// hwSwitchOn читает положение аппаратного переключателя по его метке в
+// devicetree (на Cudy TR3000 это "mode").
+//
+// Нужно на старте: обработчик /etc/rc.button/BTN_0 вызывается только при
+// СМЕНЕ положения, поэтому после перезагрузки демон сам по себе не знает,
+// куда переключатель выставлен физически, и без этой проверки мог бы
+// поднять туннель вопреки положению тумблера.
+//
+// Читаем /sys/kernel/debug/gpio, строки вида:
+//
+//	gpio-512 (                    |mode                ) in  hi IRQ ACTIVE LOW
+//
+// Уровень (hi/lo) сопоставляем с полярностью: при "ACTIVE LOW" активному
+// состоянию соответствует lo, иначе hi. Второе возвращаемое значение
+// говорит, удалось ли вообще определить положение — формат debugfs не
+// является стабильным ABI, и если разобрать не вышло, вызывающий код
+// должен откатиться к обычному булеву AUTOCONNECT, а не гадать.
+func hwSwitchOn(label string) (on bool, known bool) {
+	data, err := os.ReadFile("/sys/kernel/debug/gpio")
+	if err != nil {
+		return false, false
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "|"+label) {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		level := ""
+		for _, f := range fields {
+			if f == "hi" || f == "lo" {
+				level = f
+				break
+			}
+		}
+		if level == "" {
+			return false, false
+		}
+
+		activeLow := strings.Contains(line, "ACTIVE LOW")
+		if activeLow {
+			return level == "lo", true
+		}
+		return level == "hi", true
+	}
+
+	return false, false
+}
+
 // clearStaleFirewall убирает зону csqtt, оставшуюся в /etc/config/firewall
 // от прошлого запуска.
 //

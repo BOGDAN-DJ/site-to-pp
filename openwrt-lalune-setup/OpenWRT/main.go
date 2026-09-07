@@ -90,8 +90,7 @@ func main() {
 	go app.watchdog()
 	go app.startAPI()
 
-	if app.config.AutoConnect {
-		log("[AUTO] AUTOCONNECT включён, жду готовности сети")
+	if app.shouldAutoConnect() {
 		go app.autoConnect()
 	}
 
@@ -264,6 +263,37 @@ func (a *App) watchUnderlay(cancel <-chan struct{}) {
 				addBypassRoute(cur, ip)
 			}
 		}
+	}
+}
+
+// shouldAutoConnect решает, поднимать ли туннель на старте демона.
+//
+// Режим "switch" существует потому, что обработчик /etc/rc.button/BTN_0
+// вызывается только при СМЕНЕ положения переключателя. После перезагрузки
+// смены не было, и без явной проверки демон не знал бы, куда переключатель
+// выставлен физически — при AUTOCONNECT='1' он поднял бы туннель, даже
+// если тумблер стоит в положении "выключено".
+func (a *App) shouldAutoConnect() bool {
+	switch a.config.AutoConnect {
+	case "1", "true", "yes":
+		log("[AUTO] AUTOCONNECT=%s, жду готовности сети", a.config.AutoConnect)
+		return true
+
+	case "switch":
+		on, known := hwSwitchOn(a.config.SwitchLabel)
+		if !known {
+			log("[AUTO] AUTOCONNECT='switch', но положение переключателя %q определить не удалось — не подключаюсь", a.config.SwitchLabel)
+			return false
+		}
+		if !on {
+			log("[AUTO] Переключатель %q в положении «выключено» — не подключаюсь", a.config.SwitchLabel)
+			return false
+		}
+		log("[AUTO] Переключатель %q в положении «включено», жду готовности сети", a.config.SwitchLabel)
+		return true
+
+	default:
+		return false
 	}
 }
 

@@ -25,11 +25,19 @@ type Config struct {
 	TurnHost    string
 	TurnPort    string
 	Tun         string
-	// AutoConnect - поднимать туннель сразу при старте демона (то есть и
-	// после перезагрузки роутера). Выключено по умолчанию: пока туннель не
-	// проверен, полезно, чтобы ребут гарантированно возвращал роутер в
-	// заведомо рабочее состояние.
-	AutoConnect bool
+	// AutoConnect - что делать при старте демона (то есть и после
+	// перезагрузки роутера):
+	//
+	//	"0"      ничего, ждать команды. Значение по умолчанию: пока туннель
+	//	         не проверен, пусть ребут гарантированно возвращает роутер
+	//	         в заведомо рабочее состояние.
+	//	"1"      всегда подключаться.
+	//	"switch" подключаться, только если аппаратный переключатель
+	//	         (SwitchLabel) стоит в положении "включено".
+	AutoConnect string
+	// SwitchLabel - метка кнопки/переключателя в devicetree, положение
+	// которой смотрит режим AUTOCONNECT='switch'.
+	SwitchLabel string
 }
 
 func defaultConfig() Config {
@@ -41,6 +49,9 @@ func defaultConfig() Config {
 		DeviceID:    "unknown",
 		CaptchaMode: "auto",
 		Tun:         "csqtt0",
+		AutoConnect: "0",
+		// Метка переключателя "mode" в devicetree Cudy TR3000.
+		SwitchLabel: "mode",
 	}
 }
 
@@ -99,8 +110,11 @@ func (a *App) loadConfig() {
 				a.config.Tun = value
 			}
 		case "AUTOCONNECT":
-			a.config.AutoConnect = value == "1" || strings.EqualFold(value, "true") ||
-				strings.EqualFold(value, "yes")
+			a.config.AutoConnect = strings.ToLower(value)
+		case "SWITCH_LABEL":
+			if value != "" {
+				a.config.SwitchLabel = value
+			}
 		}
 	}
 
@@ -127,11 +141,8 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "TURN_HOST='%s'\n", a.config.TurnHost)
 	fmt.Fprintf(&b, "TURN_PORT='%s'\n", a.config.TurnPort)
 	fmt.Fprintf(&b, "TUN='%s'\n", a.config.Tun)
-	autoconnect := "0"
-	if a.config.AutoConnect {
-		autoconnect = "1"
-	}
-	fmt.Fprintf(&b, "AUTOCONNECT='%s'\n", autoconnect)
+	fmt.Fprintf(&b, "AUTOCONNECT='%s'\n", a.config.AutoConnect)
+	fmt.Fprintf(&b, "SWITCH_LABEL='%s'\n", a.config.SwitchLabel)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }
