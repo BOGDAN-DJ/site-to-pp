@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# Init-скрипт procd для демона LaLune/CSQTT.
+# Копируется в /etc/init.d/csqtt на роутере (см. README.md рядом).
+
+START=95
+STOP=10
+
+USE_PROCD=1
+
+PROG=/usr/sbin/csqtt-daemon
+
+start_service() {
+	# Каталог для конфига (/etc/csqtt/csqtt.conf) должен существовать
+	# до первого запуска — daemon сам создаёт его при сохранении конфига
+	# через /api/config/update, но на первый старт с ручным конфигом
+	# полезно подстраховаться.
+	mkdir -p /etc/csqtt
+
+	procd_open_instance
+	procd_set_param command "$PROG"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# CAP_NET_ADMIN нужен для ioctl(TUNSETIFF), ip route/addr и правки
+	# firewall — проще всего запускать от root (стандартно для OpenWrt).
+	procd_close_instance
+}
+
+stop_service() {
+	# Даём демону шанс аккуратно откатить маршруты/firewall/TUN сам —
+	# он ловит SIGTERM в main() и вызывает Disconnect() перед выходом.
+	:
+}
+
+service_triggers() {
+	procd_add_reload_trigger "csqtt"
+}

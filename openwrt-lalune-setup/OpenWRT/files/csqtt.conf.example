@@ -1,0 +1,26 @@
+# Пример /etc/csqtt/csqtt.conf для демона LaLune/CSQTT на OpenWrt.
+# Скопируйте в /etc/csqtt/csqtt.conf и заполните значениями из вашей
+# csqtt://connect?... ссылки (см. README.md, раздел "Формат ссылки").
+#
+# Обязательные поля: PEER, PASSWORD, VK.
+# Остальные можно оставить как есть — это разумные значения по умолчанию,
+# совпадающие с настройками Desktop-клиента LaLune.
+
+PEER=''
+PASSWORD=''
+VK=''
+
+N='18'
+FINGERPRINT='chrome'
+CLIENT_IDS=''
+OBFS='video'
+VK_AUTH_MODE='vkcalls'
+DEVICE_ID='unknown'
+CAPTCHA_MODE='auto'
+
+# Необязательно: свой TURN-сервер вместо того, что придёт от сервера CSQTT.
+TURN_HOST=''
+TURN_PORT=''
+
+# Имя TUN-интерфейса, который создаст демон.
+TUN='csqtt0'
