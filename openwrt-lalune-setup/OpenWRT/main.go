@@ -68,6 +68,12 @@ type App struct {
 	bypassAdded  map[string]bool
 	seenBypassIP map[string]bool
 
+	// led - штатные светодиоды роутера, которыми показываем состояние
+	// туннеля: активный мигает при подключении и ровно горит при поднятом
+	// туннеле, простойный горит когда туннеля нет. Исходное состояние обоих
+	// запоминается при старте и возвращается при выходе.
+	led leds
+
 	logs []string
 }
 
@@ -83,6 +89,10 @@ func main() {
 		seenBypassIP: map[string]bool{},
 	}
 	app.loadConfig()
+	app.led = captureLeds(app.config.Led, app.config.LedIdle)
+	// Пока туннеля нет, показываем это сразу: индикатор должен отражать
+	// состояние с первой секунды, а не только после первого действия.
+	app.led.tunnelDown()
 
 	// Зона csqtt могла пережить жёсткую перезагрузку — см. clearStaleFirewall.
 	clearStaleFirewall()
@@ -100,6 +110,9 @@ func main() {
 
 	log("Завершение по сигналу...")
 	app.Disconnect()
+	// Снимаем за собой индикацию: без демона роутер должен выглядеть так
+	// же, как до его установки.
+	app.led.restore()
 	os.Exit(0)
 }
 
@@ -189,6 +202,7 @@ func (a *App) Connect() error {
 	a.mu.Unlock()
 
 	log("[INFO] Ядро запущено (PID %d), слушаю порт %d", cmd.Process.Pid, listenPort)
+	a.led.connecting()
 
 	tunConfCh := make(chan tunConf, 1)
 	trafficCh := make(chan struct{}, 1)
@@ -403,6 +417,7 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 	a.mu.Unlock()
 
 	log("[TUN] Туннель поднят: %s %s/32, default route -> %s", ifce.Name(), conf.ip, ifce.Name())
+	a.led.tunnelUp()
 
 	bridgeTunUDP(ifce, udpConn, bridgeCh)
 	log("[TUN] Мост TUN<->UDP остановлен")
@@ -469,6 +484,7 @@ func (a *App) Disconnect() bool {
 		cmd.Process.Kill()
 	}
 
+	a.led.tunnelDown()
 	log("[INFO] Отключено")
 	return true
 }

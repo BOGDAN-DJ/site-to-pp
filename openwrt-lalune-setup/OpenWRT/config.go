@@ -38,6 +38,14 @@ type Config struct {
 	// SwitchLabel - метка кнопки/переключателя в devicetree, положение
 	// которой смотрит режим AUTOCONNECT='switch'.
 	SwitchLabel string
+	// Led - светодиод в /sys/class/leds, горящий при поднятом туннеле
+	// (и мигающий во время подключения). Пустое значение отключает
+	// индикацию.
+	Led string
+	// LedIdle - светодиод, горящий когда туннеля нет. На Cudy TR3000 это
+	// второй цвет того же физического индикатора: гасить его совсем было
+	// бы плохо, роутер выглядел бы выключенным.
+	LedIdle string
 }
 
 func defaultConfig() Config {
@@ -52,6 +60,9 @@ func defaultConfig() Config {
 		AutoConnect: "0",
 		// Метка переключателя "mode" в devicetree Cudy TR3000.
 		SwitchLabel: "mode",
+		// Штатный индикатор Cudy TR3000, в обычной жизни горит ровно.
+		Led:     "white:status",
+		LedIdle: "red:power",
 	}
 }
 
@@ -115,6 +126,10 @@ func (a *App) loadConfig() {
 			if value != "" {
 				a.config.SwitchLabel = value
 			}
+		case "LED":
+			a.config.Led = value
+		case "LED_IDLE":
+			a.config.LedIdle = value
 		}
 	}
 
@@ -143,6 +158,8 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "TUN='%s'\n", a.config.Tun)
 	fmt.Fprintf(&b, "AUTOCONNECT='%s'\n", a.config.AutoConnect)
 	fmt.Fprintf(&b, "SWITCH_LABEL='%s'\n", a.config.SwitchLabel)
+	fmt.Fprintf(&b, "LED='%s'\n", a.config.Led)
+	fmt.Fprintf(&b, "LED_IDLE='%s'\n", a.config.LedIdle)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }
