@@ -431,6 +431,13 @@ csqtt://connect?v=2&host=HOST&peer=PORT&password=PASSWORD&hashes=HASH1+HASH2+HAS
 - При первом подключении в лог попадает
   `[UCI] uci delete firewall.csqtt.device -> exit status 1` — это шум, а не
   ошибка: удаляется опция, которой ещё нет.
+- Строки, которые ядро повторяет постоянно (`[СТАТИСТИКА]` раз в секунду,
+  keepalive `ChannelBind` и `Refresh` на каждую из 18 сессий), попадают в
+  лог не чаще раза в минуту. Иначе кольцевой буфер демона на 1000 строк
+  забивался ими целиком примерно за четверть часа, а поскольку stdout
+  демона procd отправляет в системный лог, `logread` на 97% состоял из
+  csqtt и вытеснял всё остальное. Актуальная статистика при этом всегда
+  доступна целиком в `/api/status`, поле `core_stats`.
 - **После отключения в nftables остаются семь пустых цепочек**
   (`input_csqtt`, `output_csqtt`, `forward_csqtt`, `accept_to_csqtt`,
   `reject_from_csqtt`, `reject_to_csqtt`, `srcnat_csqtt`). Из uci-конфига

@@ -74,6 +74,14 @@ type App struct {
 	// запоминается при старте и возвращается при выходе.
 	led leds
 
+	// coreStats - последняя строка статистики от ядра. Хранится отдельно
+	// потому, что в лог такие строки попадают прорежёнными, а текущие
+	// цифры хочется видеть сразу и целиком.
+	coreStats string
+	// noiseLogged - когда в последний раз пропускали в лог строку каждого
+	// из повторяющихся классов (см. coreNoise).
+	noiseLogged map[string]time.Time
+
 	logs []string
 }
 
@@ -87,6 +95,7 @@ func main() {
 		configFile:   configPath,
 		bypassAdded:  map[string]bool{},
 		seenBypassIP: map[string]bool{},
+		noiseLogged:  map[string]time.Time{},
 	}
 	app.loadConfig()
 	app.led = captureLeds(app.config.Led, app.config.LedIdle)
@@ -210,7 +219,7 @@ func (a *App) Connect() error {
 
 	watcher := &logWatcher{
 		path:       logPath,
-		onLine:     func(line string) { log("[CORE] %s", line) },
+		onLine:     a.logCoreLine,
 		onTunConf:  tunConfCh,
 		onTraffic:  trafficCh,
 		onBypassIP: bypassIPCh,
@@ -223,6 +232,34 @@ func (a *App) Connect() error {
 	go a.finishConnect(cmd, listenPort, tunConfCh, trafficCh, watchCancel)
 
 	return nil
+}
+
+// logCoreLine пишет строку из лога ядра в общий лог, прореживая те, что
+// ядро повторяет постоянно (см. coreNoise в process.go). Последняя строка
+// статистики при этом всегда сохраняется целиком и отдаётся в /api/status,
+// так что текущие цифры доступны без выуживания их из лога.
+func (a *App) logCoreLine(line string) {
+	if coreNoise["stats"].MatchString(line) {
+		a.mu.Lock()
+		a.coreStats = line
+		a.mu.Unlock()
+	}
+
+	if class := coreNoiseClass(line); class != "" {
+		now := time.Now()
+		a.mu.Lock()
+		last, seen := a.noiseLogged[class]
+		allow := !seen || now.Sub(last) >= coreNoiseInterval
+		if allow {
+			a.noiseLogged[class] = now
+		}
+		a.mu.Unlock()
+		if !allow {
+			return
+		}
+	}
+
+	log("[CORE] %s", line)
 }
 
 // watchUnderlay следит за сменой канала, через который роутер реально ходит
@@ -575,6 +612,9 @@ func (a *App) startAPI() {
 			"connected": a.connected,
 			"tun_up":    a.tunUp,
 			"pid":       a.corePID,
+			// Статистика ядра приходит раз в секунду и в лог попадает
+			// прорежённой — здесь всегда самая свежая.
+			"core_stats": a.coreStats,
 		}
 		a.mu.Unlock()
 		writeJSON(w, status)

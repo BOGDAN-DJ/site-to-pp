@@ -75,6 +75,35 @@ func peerHost(peer string) string {
 	return host
 }
 
+// Ядро повторяет эти строки бесконечно: статистику раз в секунду, а
+// keepalive TURN — на каждую сессию (их 18). Пропускать их в лог как есть
+// нельзя: кольцевой буфер демона на 1000 строк заполнялся ими целиком за
+// четверть часа, а поскольку stdout демона procd отправляет в системный
+// лог, туда же уходило и всё остальное — logread на 97% состоял из csqtt,
+// и разобраться по логам в чём-либо становилось невозможно ровно тогда,
+// когда это нужнее всего.
+//
+// Поэтому такие строки логируются не чаще раза в coreNoiseInterval, а
+// последняя статистика всегда доступна целиком через /api/status.
+var coreNoise = map[string]*regexp.Regexp{
+	"stats":       regexp.MustCompile(`\[СТАТИСТИКА\]`),
+	"channelbind": regexp.MustCompile(`ChannelBind активен`),
+	"refresh":     regexp.MustCompile(`Refresh аллокации`),
+}
+
+const coreNoiseInterval = time.Minute
+
+// coreNoiseClass возвращает класс повторяющейся строки или "" для строк,
+// которые надо логировать всегда.
+func coreNoiseClass(line string) string {
+	for class, re := range coreNoise {
+		if re.MatchString(line) {
+			return class
+		}
+	}
+	return ""
+}
+
 var (
 	reTunConf  = regexp.MustCompile(`Tunnel IP:\s*([\d.]+)(?:/\d+)?\s*\|\s*DNS:\s*([\d.,\s]+)`)
 	reListen   = regexp.MustCompile(`Слушаю:\s*127\.0\.0\.1:(\d+)`)
