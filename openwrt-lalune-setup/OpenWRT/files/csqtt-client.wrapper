@@ -1,0 +1,13 @@
+#!/bin/sh
+# Запуск ядра csqtt-client через собственный загрузчик glibc.
+#
+# Ставится в /usr/bin/csqtt-client. Нужен потому, что релизы csqtt-core
+# собраны под glibc (символы вплоть до GLIBC_2.38), а OpenWrt использует
+# musl: без этого ядро не находит ELF-интерпретатор и падает с "not found"
+# при том, что файл на месте и исполняемый.
+#
+# exec обязателен: демон шлёт SIGTERM по PID запущенного процесса, и если
+# бы тут остался промежуточный /bin/sh, сигнал ушёл бы не туда.
+exec /opt/glibc/ld-linux-aarch64.so.1 \
+	--library-path /opt/glibc \
+	/opt/csqtt/csqtt-client-glibc "$@"

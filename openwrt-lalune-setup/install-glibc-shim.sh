@@ -39,6 +39,7 @@ GLIBC_DEB_URL="http://ftp.debian.org/debian/pool/main/g/glibc/libc6_2.41-12+deb1
 LIBGCC_DEB_URL="http://ftp.debian.org/debian/pool/main/g/gcc-14/libgcc-s1_14.2.0-19_arm64.deb"
 CORE_URL="https://github.com/Endlad2/csqtt-core/releases/latest/download/client-linux-arm64"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -103,14 +104,12 @@ else
 fi
 chmod +x "$WORK/payload/csqtt-client-glibc"
 
-# Обёртка. exec обязателен: демон шлёт SIGTERM по PID запущенного процесса,
-# и если тут останется промежуточный /bin/sh, сигнал уйдёт не туда.
-cat > "$WORK/payload/csqtt-client-wrapper" <<'WRAPPER'
-#!/bin/sh
-exec /opt/glibc/ld-linux-aarch64.so.1 \
-	--library-path /opt/glibc \
-	/opt/csqtt/csqtt-client-glibc "$@"
-WRAPPER
+# Обёртка лежит отдельным файлом рядом со скриптом: тот же самый файл берёт
+# workflow сборки прошивки, и держать две копии одного shell-скрипта,
+# которые обязаны совпадать, не стоит.
+WRAPPER_SRC="$SCRIPT_DIR/OpenWRT/files/csqtt-client.wrapper"
+[ -f "$WRAPPER_SRC" ] || { echo "Не найдена обёртка: $WRAPPER_SRC" >&2; exit 1; }
+cp "$WRAPPER_SRC" "$WORK/payload/csqtt-client-wrapper"
 
 tar -C "$WORK/payload" -czf "$WORK/payload.tar.gz" .
 
