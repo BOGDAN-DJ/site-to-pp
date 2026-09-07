@@ -1,0 +1,9 @@
+# Всё, что уезжает на роутер или запускается как shell-скрипт, обязано иметь
+# LF-переводы строк. При core.autocrlf=true (значение по умолчанию для Git на
+# Windows) checkout иначе делает CRLF, и на роутере ломается shebang:
+# `#!/bin/sh /etc/rc.common\r` заставляет ash искать файл "/etc/rc.common\r",
+# из-за чего /etc/init.d/csqtt падает с "can't open '/etc/rc.common'".
+*.sh          text eol=lf
+*.go          text eol=lf
+OpenWRT/files/*      text eol=lf
+OpenWRT/files/*.init text eol=lf

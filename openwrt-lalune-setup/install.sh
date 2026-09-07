@@ -27,6 +27,16 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FILES_DIR="$SCRIPT_DIR/OpenWRT/files"
 
+# У OpenWrt в базовой поставке нет /usr/libexec/sftp-server, а scp начиная с
+# OpenSSH 9.0 по умолчанию ходит по SFTP и падает с "Connection closed".
+# -O возвращает legacy-протокол scp; на клиентах старше OpenSSH 8.6 флага нет,
+# поэтому подставляем его только если он поддерживается.
+if scp -O 2>&1 | grep -q 'unknown option'; then
+	SCP="scp"
+else
+	SCP="scp -O"
+fi
+
 echo "==> Проверяю роутер"
 ARCH="$(ssh "$ROUTER" 'uname -m')"
 echo "    Архитектура: $ARCH"
@@ -39,17 +49,29 @@ if ! ssh "$ROUTER" 'command -v fw4 >/dev/null 2>&1'; then
 	echo "    На старых сборках с fw3 правила firewall придётся добавить вручную." >&2
 fi
 
+# Без /dev/net/tun демон не сможет создать интерфейс (ioctl TUNSETIFF) и
+# Connect() упадёт на setupTunDevice. В образе OpenWrt для filogic kmod-tun
+# по умолчанию не установлен, поэтому ставим его сами.
+if ! ssh "$ROUTER" '[ -c /dev/net/tun ]'; then
+	echo "    /dev/net/tun отсутствует — ставлю kmod-tun"
+	ssh "$ROUTER" '(apk add kmod-tun || opkg update && opkg install kmod-tun) && modprobe tun'
+	if ! ssh "$ROUTER" '[ -c /dev/net/tun ]'; then
+		echo "    ОШИБКА: не удалось получить /dev/net/tun — демон не сможет поднять туннель." >&2
+		exit 1
+	fi
+fi
+
 echo "==> Копирую файлы"
 ssh "$ROUTER" 'mkdir -p /etc/csqtt'
-scp "$DAEMON_BIN" "$ROUTER:/usr/sbin/csqtt-daemon"
-scp "$FILES_DIR/csqtt.init" "$ROUTER:/etc/init.d/csqtt"
+$SCP "$DAEMON_BIN" "$ROUTER:/usr/sbin/csqtt-daemon"
+$SCP "$FILES_DIR/csqtt.init" "$ROUTER:/etc/init.d/csqtt"
 
 if [ -n "$CORE_BIN" ]; then
 	if [ ! -f "$CORE_BIN" ]; then
 		echo "Не найден бинарник ядра: $CORE_BIN" >&2
 		exit 1
 	fi
-	scp "$CORE_BIN" "$ROUTER:/usr/bin/csqtt-client"
+	$SCP "$CORE_BIN" "$ROUTER:/usr/bin/csqtt-client"
 	ssh "$ROUTER" 'chmod +x /usr/bin/csqtt-client'
 fi
 
@@ -57,7 +79,7 @@ fi
 if ssh "$ROUTER" '[ -f /etc/csqtt/csqtt.conf ]'; then
 	echo "    /etc/csqtt/csqtt.conf уже существует — оставляю как есть"
 else
-	scp "$FILES_DIR/csqtt.conf.example" "$ROUTER:/etc/csqtt/csqtt.conf"
+	$SCP "$FILES_DIR/csqtt.conf.example" "$ROUTER:/etc/csqtt/csqtt.conf"
 	ssh "$ROUTER" 'chmod 600 /etc/csqtt/csqtt.conf'
 fi
 
@@ -66,7 +88,8 @@ ssh "$ROUTER" 'chmod +x /usr/sbin/csqtt-daemon /etc/init.d/csqtt && /etc/init.d/
 
 sleep 2
 echo "==> Статус"
-ssh "$ROUTER" 'curl -s http://127.0.0.1:8080/api/status || echo "(API ещё не отвечает — проверьте logread | grep csqtt)"'
+# curl в базовой поставке OpenWrt нет — там uclient-fetch, притворяющийся wget.
+ssh "$ROUTER" 'if command -v curl >/dev/null 2>&1; then curl -s http://127.0.0.1:8080/api/status; else wget -qO- http://127.0.0.1:8080/api/status; fi || echo "(API ещё не отвечает — проверьте logread | grep csqtt)"'
 echo
 
 cat <<EOF
