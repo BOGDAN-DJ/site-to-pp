@@ -59,8 +59,14 @@ type App struct {
 	udpConn  *net.UDPConn
 	bridgeCh chan struct{}
 
-	origRoute   defaultRoute
-	bypassAdded map[string]bool
+	origRoute defaultRoute
+	// bypassAdded - маршруты, которые демон создал сам и обязан снять при
+	// отключении. seenBypassIP шире: это все адреса, которые мы уже
+	// рассматривали, включая те, для которых маршрут не понадобился —
+	// нужен, чтобы не обрабатывать один и тот же relay-адрес повторно на
+	// каждое его упоминание в логе ядра.
+	bypassAdded  map[string]bool
+	seenBypassIP map[string]bool
 
 	logs []string
 }
@@ -72,8 +78,9 @@ func main() {
 	log("=== LaLune OpenWrt daemon ===")
 
 	app = &App{
-		configFile:  configPath,
-		bypassAdded: map[string]bool{},
+		configFile:   configPath,
+		bypassAdded:  map[string]bool{},
+		seenBypassIP: map[string]bool{},
 	}
 	app.loadConfig()
 
@@ -131,15 +138,20 @@ func (a *App) Connect() error {
 		log("[WARN] Не удалось определить исходный default route — обходные маршруты к серверу не будут работать корректно")
 	}
 
+	// Запоминаем только те адреса, для которых маршрут действительно был
+	// создан: при отключении мы их удаляем, и трогать чужие маршруты,
+	// которых мы не создавали, нельзя.
 	bypassed := map[string]bool{}
 	for _, ip := range resolveHost(peerHost(cfg.Peer)) {
-		addBypassRoute(origRoute, ip)
-		bypassed[ip] = true
+		if addBypassRoute(origRoute, ip) {
+			bypassed[ip] = true
+		}
 	}
 	if cfg.TurnHost != "" {
 		for _, ip := range resolveHost(cfg.TurnHost) {
-			addBypassRoute(origRoute, ip)
-			bypassed[ip] = true
+			if addBypassRoute(origRoute, ip) {
+				bypassed[ip] = true
+			}
 		}
 	}
 
@@ -159,6 +171,12 @@ func (a *App) Connect() error {
 	a.corePID = cmd.Process.Pid
 	a.origRoute = origRoute
 	a.bypassAdded = bypassed
+	// Адреса peer/TURN уже рассмотрены — повторно их обрабатывать не нужно,
+	// даже если ядро упомянет их в логе.
+	a.seenBypassIP = map[string]bool{}
+	for ip := range bypassed {
+		a.seenBypassIP[ip] = true
+	}
 	a.mu.Unlock()
 
 	log("[INFO] Ядро запущено (PID %d), слушаю порт %d", cmd.Process.Pid, listenPort)
@@ -190,15 +208,24 @@ func (a *App) consumeBypassIPs(ch <-chan string, cancel <-chan struct{}) {
 			return
 		case ip := <-ch:
 			a.mu.Lock()
-			already := a.bypassAdded[ip]
+			already := a.seenBypassIP[ip]
 			if !already {
-				a.bypassAdded[ip] = true
+				a.seenBypassIP[ip] = true
 			}
 			orig := a.origRoute
 			a.mu.Unlock()
-			if !already {
-				log("[ROUTE] Обходной маршрут для relay/TURN %s", ip)
-				addBypassRoute(orig, ip)
+			if already {
+				continue
+			}
+			log("[ROUTE] Обходной маршрут для relay/TURN %s", ip)
+			// В bypassAdded попадают только реально созданные маршруты —
+			// их и только их снимает Disconnect. Отдельный seenBypassIP
+			// нужен, чтобы не дёргать ip route на каждое повторное
+			// упоминание адреса в логе ядра.
+			if addBypassRoute(orig, ip) {
+				a.mu.Lock()
+				a.bypassAdded[ip] = true
+				a.mu.Unlock()
 			}
 		}
 	}
@@ -296,6 +323,7 @@ func (a *App) Disconnect() bool {
 	a.udpConn = nil
 	a.bridgeCh = nil
 	a.bypassAdded = map[string]bool{}
+	a.seenBypassIP = map[string]bool{}
 	a.mu.Unlock()
 
 	log("[INFO] Отключение...")

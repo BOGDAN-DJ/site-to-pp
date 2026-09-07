@@ -62,7 +62,10 @@ if ! ssh "$ROUTER" '[ -c /dev/net/tun ]'; then
 fi
 
 echo "==> Копирую файлы"
-ssh "$ROUTER" 'mkdir -p /etc/csqtt'
+# Демон надо остановить до копирования: пишем поверх работающего бинарника,
+# и ядро отвечает ETXTBSY ("Text file busy"). Заодно это заставляет демон
+# поймать SIGTERM и откатить маршруты/firewall/TUN, если туннель был поднят.
+ssh "$ROUTER" '[ -x /etc/init.d/csqtt ] && /etc/init.d/csqtt stop 2>/dev/null; mkdir -p /etc/csqtt'
 $SCP "$DAEMON_BIN" "$ROUTER:/usr/sbin/csqtt-daemon"
 $SCP "$FILES_DIR/csqtt.init" "$ROUTER:/etc/init.d/csqtt"
 

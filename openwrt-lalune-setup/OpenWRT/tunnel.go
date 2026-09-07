@@ -54,19 +54,55 @@ func runIP(args ...string) error {
 	return err
 }
 
+// needsBypassRoute сообщает, нужен ли отдельный host-маршрут к ip.
+//
+// Если адрес лежит в подсети, подключённой к интерфейсу напрямую, его уже
+// обслуживает connected-маршрут: он длиннее default и спокойно переживёт
+// его подмену на туннель. Прокладывать для такого адреса /32 "via шлюз" не
+// просто лишнее, а вредно — пакет уходит на шлюз, которому приходится
+// разворачивать его обратно в ту же подсеть, и часть роутеров этого не
+// делает вовсе.
+//
+// Отличаем одно от другого по выводу `ip route get`: для адреса за шлюзом
+// там есть "via", для напрямую доступного — только "dev".
+//
+//	# ip route get 192.168.31.199
+//	192.168.31.199 dev eth0 src 192.168.31.179
+//	# ip route get 8.8.8.8
+//	8.8.8.8 via 192.168.31.100 dev eth0 src 192.168.31.179
+//
+// Вызывать до подмены default route — после неё ответ будет уже про туннель.
+func needsBypassRoute(ip string) bool {
+	out, err := exec.Command("ip", "-4", "route", "get", ip).Output()
+	if err != nil {
+		// Не смогли выяснить — безопаснее проложить маршрут, чем остаться
+		// без связи с сервером после переключения default route.
+		return true
+	}
+	return strings.Contains(string(out), " via ")
+}
+
 // addBypassRoute прокладывает host-маршрут (/32) к ip через исходный шлюз,
 // чтобы трафик к серверу CSQTT (и его TURN/relay-узлам) не пытался уйти
 // в туннель, который сам через этот сервер и поднимается.
-func addBypassRoute(orig defaultRoute, ip string) {
+//
+// Возвращает true, если маршрут действительно был добавлен — вызывающий код
+// запоминает только такие адреса, чтобы при отключении не удалить чужой
+// маршрут, которого он не создавал.
+func addBypassRoute(orig defaultRoute, ip string) bool {
 	if !orig.has || net.ParseIP(ip) == nil {
-		return
+		return false
+	}
+	if !needsBypassRoute(ip) {
+		log("[ROUTE] %s доступен напрямую, обходной маршрут не нужен", ip)
+		return false
 	}
 	args := []string{"route", "replace", ip + "/32"}
 	if orig.gateway != "" {
 		args = append(args, "via", orig.gateway)
 	}
 	args = append(args, "dev", orig.dev)
-	runIP(args...)
+	return runIP(args...) == nil
 }
 
 func removeBypassRoute(ip string) {
