@@ -87,8 +87,12 @@ pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-rad
 </div>
 
 <div class="card">
-  <div class="state"><strong style="font-size:14px">Журнал</strong>
-    <button id="reload" class="ghost">Обновить</button></div>
+  <div class="state"><strong style="font-size:14px" id="logtitle">Журнал</strong>
+    <span class="row" style="margin:0">
+      <button id="tablive" class="ghost">Текущий</button>
+      <button id="tabinc" class="ghost">Инциденты</button>
+      <button id="reload" class="ghost">Обновить</button>
+    </span></div>
   <pre id="log">…</pre>
 </div>
 
@@ -145,12 +149,23 @@ function refresh() {
   });
 }
 
+var logSource = '/api/logs';
+
 function loadLog() {
-  fetch('/api/logs').then(function (r) { return r.text(); }).then(function (t) {
+  fetch(logSource).then(function (r) { return r.text(); }).then(function (t) {
     var el = document.getElementById('log');
-    el.textContent = t.trim().split('\n').slice(-60).join('\n');
+    var lines = t.trim().split('\n');
+    // Текущий журнал длинный и интересен хвостом, а сохранённые инциденты
+    // короткие, и в них важно начало записи — там причина сбоя.
+    el.textContent = (logSource === '/api/logs' ? lines.slice(-60) : lines).join('\n');
     el.scrollTop = el.scrollHeight;
   });
+}
+
+function setLogSource(src, title) {
+  logSource = src;
+  document.getElementById('logtitle').textContent = title;
+  loadLog();
 }
 
 function msg(text, ok) {
@@ -196,6 +211,12 @@ document.getElementById('save').onclick = function () {
 };
 
 document.getElementById('reload').onclick = loadLog;
+document.getElementById('tablive').onclick = function () {
+  setLogSource('/api/logs', 'Журнал');
+};
+document.getElementById('tabinc').onclick = function () {
+  setLogSource('/api/logs/incidents', 'Инциденты (переживают перезагрузку)');
+};
 
 refresh();
 loadLog();

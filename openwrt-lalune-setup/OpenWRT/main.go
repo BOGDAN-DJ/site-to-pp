@@ -142,6 +142,7 @@ func main() {
 	<-sig
 
 	log("Завершение по сигналу...")
+	app.persistLogs("завершение по сигналу")
 	app.Disconnect()
 	// Снимаем за собой индикацию: без демона роутер должен выглядеть так
 	// же, как до его установки.
@@ -537,6 +538,7 @@ func (a *App) scheduleRetry(reason string) {
 	a.mu.Unlock()
 
 	log("[WATCHDOG] Не удалось подключиться (%s) — повтор через %s", reason, delay)
+	a.persistLogs("не удалось подключиться: " + reason)
 }
 
 // watchdog перезапускает подключение в двух случаях:
@@ -600,6 +602,7 @@ func (a *App) watchdog() {
 
 func (a *App) reconnect(reason string) {
 	log("[WATCHDOG] %s, переподключаюсь...", reason)
+	a.persistLogs("watchdog: " + reason)
 	a.Disconnect()
 	time.Sleep(2 * time.Second)
 	if err := a.Connect(); err != nil {
@@ -696,6 +699,18 @@ func (a *App) startAPI() {
 
 	mux.HandleFunc("/", a.handlePanel)
 	mux.HandleFunc("/api/config/link", a.handleLink)
+
+	// Сохранённые на флеш логи прошлых сбоев — чтобы смотреть их из панели,
+	// а не только по ssh. Переживают перезагрузку, в отличие от /api/logs.
+	mux.HandleFunc("/api/logs/incidents", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		data, err := os.ReadFile(persistLogPath)
+		if err != nil {
+			fmt.Fprintln(w, "Сохранённых инцидентов нет.")
+			return
+		}
+		w.Write(data)
+	})
 
 	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
