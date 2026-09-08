@@ -43,7 +43,12 @@ type statusSnapshot struct {
 	TunIP    string `json:"tun_ip"`
 	Underlay string `json:"underlay"`
 
-	Peer        string `json:"peer"`
+	Peer string `json:"peer"`
+	// Retrying и RetryIn показывают, что демон не сдался, а ждёт повтора.
+	// Без этого панель рисовала бы просто «Выключен», и отличить «не смог и
+	// перестал пытаться» от «сейчас попробует снова» было бы невозможно.
+	Retrying    bool   `json:"retrying"`
+	RetryIn     int    `json:"retry_in_sec"`
 	Configured  bool   `json:"configured"`
 	AutoConnect string `json:"autoconnect"`
 
@@ -61,12 +66,18 @@ func (a *App) snapshot() statusSnapshot {
 		TunName:     a.config.Tun,
 		TunIP:       a.tunIP,
 		Peer:        a.config.Peer,
+		Retrying:    a.wantConnected && !a.connected && !a.nextRetry.IsZero(),
 		AutoConnect: a.config.AutoConnect,
 		Version:     daemonVersion,
 	}
 	s.Configured = a.config.Peer != "" && a.config.Password != "" && a.config.VkHashes != ""
 	if !a.connectedAt.IsZero() && a.connected {
 		s.Uptime = int(time.Since(a.connectedAt).Seconds())
+	}
+	if s.Retrying {
+		if left := time.Until(a.nextRetry); left > 0 {
+			s.RetryIn = int(left.Seconds())
+		}
 	}
 	stats := a.coreStats
 	a.mu.Unlock()

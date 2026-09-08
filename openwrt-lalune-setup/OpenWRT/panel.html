@@ -112,9 +112,15 @@ function setBadge(st) {
   b.className = 'badge';
   if (st.tun_up) { b.classList.add('on'); b.textContent = 'Туннель поднят'; }
   else if (st.connected) { b.classList.add('wait'); b.textContent = 'Подключение…'; }
+  else if (st.retrying) {
+    b.classList.add('wait');
+    b.textContent = st.retry_in_sec
+      ? 'Повтор через ' + st.retry_in_sec + ' с'
+      : 'Повторная попытка…';
+  }
   else { b.classList.add('off'); b.textContent = 'Выключен'; }
-  t.textContent = st.connected ? 'Отключить' : 'Подключить';
-  t.disabled = busy || (!st.connected && !st.configured);
+  t.textContent = (st.connected || st.retrying) ? 'Отключить' : 'Подключить';
+  t.disabled = busy || (!st.connected && !st.retrying && !st.configured);
   t.title = (!st.connected && !st.configured) ? 'Сначала сохраните ссылку подключения' : '';
 }
 

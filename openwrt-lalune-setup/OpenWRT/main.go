@@ -73,6 +73,24 @@ type App struct {
 	// По нему детектируется зависший туннель, см. watchdog.
 	lastActive time.Time
 
+	// wantConnected - ЖЕЛАЕМОЕ состояние, в отличие от connected, который
+	// описывает фактическое. Их обязательно надо различать: попытка
+	// подключения может не удаться (например, канал в интернет пропал в
+	// момент старта ядра), и тогда connected становится false, хотя
+	// пользователь по-прежнему хочет туннель — тумблер стоит в положении
+	// «включено», а обработчик кнопки срабатывает только на СМЕНУ
+	// положения и повторно не вызовется.
+	//
+	// Без этого разделения демон после неудачной попытки замолкал навсегда,
+	// и починить это можно было только перещёлкиванием тумблера туда-обратно
+	// или перезапуском сервиса.
+	wantConnected bool
+	// retryDelay - текущая пауза между повторными попытками. Растёт вдвое
+	// при каждой неудаче, чтобы не долбить сервер в отсутствие связи.
+	retryDelay time.Duration
+	// nextRetry - когда watchdog имеет право попробовать снова.
+	nextRetry time.Time
+
 	// led - штатные светодиоды роутера, которыми показываем состояние
 	// туннеля: активный мигает при подключении и ровно горит при поднятом
 	// туннеле, простойный горит когда туннеля нет. Исходное состояние обоих
@@ -153,6 +171,19 @@ func (a *App) IsConnected() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.connected
+}
+
+// WantsConnection - хочет ли пользователь, чтобы туннель был поднят. Это не
+// то же самое, что IsConnected: между неудачной попыткой и следующим
+// повтором фактического подключения нет, но намерение есть.
+//
+// Именно это состояние должно управлять переключением: иначе кнопка
+// «Отключить», нажатая во время ожидания повтора, запускала бы новую
+// попытку вместо отмены.
+func (a *App) WantsConnection() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.connected || a.wantConnected
 }
 
 func (a *App) Connect() error {
@@ -273,6 +304,7 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 		case <-deadline:
 			log("[TUN] Таймаут ожидания подключения — отключаюсь")
 			a.Disconnect()
+			a.scheduleRetry("таймаут подключения")
 			return
 		case <-watchCancel:
 			return
@@ -283,6 +315,7 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 	if err != nil {
 		log("[TUN] Ошибка настройки TUN: %v", err)
 		a.Disconnect()
+		a.scheduleRetry("не удалось создать TUN")
 		return
 	}
 
@@ -291,6 +324,7 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 		log("[TUN] Ошибка подключения к ядру по UDP: %v", err)
 		ifce.Close()
 		a.Disconnect()
+		a.scheduleRetry("нет связи с ядром по UDP")
 		return
 	}
 
@@ -311,6 +345,9 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 	a.tunUp = true
 	a.tunIP = conf.ip
 	a.connectedAt = time.Now()
+	// Туннель поднялся — счётчик неудач больше не актуален.
+	a.retryDelay = retryDelayMin
+	a.nextRetry = time.Time{}
 	a.mu.Unlock()
 
 	log("[TUN] Туннель поднят: %s %s/32, в туннель идёт %v", ifce.Name(), conf.ip, subnets)
@@ -361,7 +398,7 @@ func (a *App) autoConnect() {
 	for time.Now().Before(deadline) {
 		if getDefaultRoute(a.currentTunName()).has {
 			log("[AUTO] Сеть готова, подключаюсь")
-			if err := a.Connect(); err != nil {
+			if err := a.RequestConnect(); err != nil {
 				log("[AUTO] Не удалось подключиться: %v", err)
 			}
 			return
@@ -442,6 +479,66 @@ func (a *App) Disconnect() bool {
 // сессий, но не заставляют ждать слишком долго.
 const staleTunnelTimeout = 90 * time.Second
 
+// Пауза перед повторной попыткой после неудачи. Растёт вдвое до максимума:
+// если канала в интернет нет, долбить сервер каждые десять секунд смысла
+// нет, но и ждать полчаса после короткого сбоя тоже неправильно.
+const (
+	retryDelayMin = 10 * time.Second
+	retryDelayMax = 5 * time.Minute
+)
+
+// RequestConnect и RequestDisconnect выражают НАМЕРЕНИЕ пользователя, в
+// отличие от Connect/Disconnect, которые просто выполняют механику. Разница
+// в том, что намерение переживает неудачу: если подключиться не вышло,
+// watchdog будет повторять попытки, пока намерение не отменят.
+//
+// Вызывать их надо отовсюду, где решение принимает человек или его
+// настройка: API, переключатель, автоподключение при старте. Внутренние
+// сбои (таймаут, зависший туннель) должны звать Connect/Disconnect напрямую,
+// чтобы не сбрасывать намерение.
+func (a *App) RequestConnect() error {
+	a.mu.Lock()
+	a.wantConnected = true
+	a.retryDelay = retryDelayMin
+	a.nextRetry = time.Time{}
+	a.mu.Unlock()
+
+	err := a.Connect()
+	if err != nil {
+		a.scheduleRetry(err.Error())
+	}
+	return err
+}
+
+func (a *App) RequestDisconnect() bool {
+	a.mu.Lock()
+	a.wantConnected = false
+	a.nextRetry = time.Time{}
+	a.mu.Unlock()
+
+	return a.Disconnect()
+}
+
+// scheduleRetry назначает следующую попытку и увеличивает паузу.
+func (a *App) scheduleRetry(reason string) {
+	a.mu.Lock()
+	if !a.wantConnected {
+		a.mu.Unlock()
+		return
+	}
+	if a.retryDelay < retryDelayMin {
+		a.retryDelay = retryDelayMin
+	}
+	delay := a.retryDelay
+	a.nextRetry = time.Now().Add(delay)
+	if a.retryDelay *= 2; a.retryDelay > retryDelayMax {
+		a.retryDelay = retryDelayMax
+	}
+	a.mu.Unlock()
+
+	log("[WATCHDOG] Не удалось подключиться (%s) — повтор через %s", reason, delay)
+}
+
 // watchdog перезапускает подключение в двух случаях:
 //
 //   - процесс ядра неожиданно завершился;
@@ -463,9 +560,26 @@ func (a *App) watchdog() {
 		done := a.coreDone
 		tunUp := a.tunUp
 		idle := time.Since(a.lastActive)
+		want := a.wantConnected
+		nextRetry := a.nextRetry
 		a.mu.Unlock()
 
-		if !connected || done == nil {
+		// Туннеля нет, но его хотят — значит попытка провалилась (таймаут
+		// подключения, пропавший канал, недоступный сервер). Раньше эта
+		// ветка отсутствовала, и демон после первой же неудачи замолкал
+		// навсегда, хотя тумблер оставался в положении «включено».
+		if !connected {
+			if !want || nextRetry.IsZero() || time.Now().Before(nextRetry) {
+				continue
+			}
+			log("[WATCHDOG] Пробую подключиться снова")
+			if err := a.Connect(); err != nil {
+				a.scheduleRetry(err.Error())
+			}
+			continue
+		}
+
+		if done == nil {
 			continue
 		}
 
@@ -489,7 +603,7 @@ func (a *App) reconnect(reason string) {
 	a.Disconnect()
 	time.Sleep(2 * time.Second)
 	if err := a.Connect(); err != nil {
-		log("[WATCHDOG] Переподключение не удалось: %v", err)
+		a.scheduleRetry(err.Error())
 	}
 }
 
@@ -548,7 +662,7 @@ func (a *App) startAPI() {
 	})
 
 	mux.HandleFunc("/api/connect", func(w http.ResponseWriter, r *http.Request) {
-		err := a.Connect()
+		err := a.RequestConnect()
 		resp := map[string]interface{}{"success": err == nil}
 		if err != nil {
 			resp["error"] = err.Error()
@@ -557,7 +671,7 @@ func (a *App) startAPI() {
 	})
 
 	mux.HandleFunc("/api/disconnect", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]bool{"success": a.Disconnect()})
+		writeJSON(w, map[string]bool{"success": a.RequestDisconnect()})
 	})
 
 	// /api/toggle - для физической кнопки на роутере: решение о том, что
@@ -566,12 +680,12 @@ func (a *App) startAPI() {
 	// connect или disconnect, между двумя запросами состояние могло бы
 	// смениться (нажали дважды подряд, сработал watchdog).
 	mux.HandleFunc("/api/toggle", func(w http.ResponseWriter, r *http.Request) {
-		if a.IsConnected() {
-			a.Disconnect()
+		if a.WantsConnection() {
+			a.RequestDisconnect()
 			writeJSON(w, map[string]interface{}{"success": true, "action": "disconnected"})
 			return
 		}
-		err := a.Connect()
+		err := a.RequestConnect()
 		resp := map[string]interface{}{"success": err == nil, "action": "connected"}
 		if err != nil {
 			resp["action"] = "failed"
