@@ -492,11 +492,17 @@ dnsmasq[1]: possible DNS-rebind attack detected: ats.karelia.pro
 
 ```sh
 uci add_list dhcp.@dnsmasq[0].rebind_domain='karelia.pro'
+uci add_list dhcp.@dnsmasq[0].rebind_domain='citylink.pro'
 uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```
 
-Исключение распространяется и на поддомены. Настройка живёт в
+Исключение распространяется и на поддомены. Домены перечисляются списком:
+это не единичный случай, а закономерность. Провайдер публикует внутренние
+сервисы в публичном DNS с приватными адресами, и вторым таким же оказался
+рабочий сайт `work.citylink.pro` (`10.0.99.250`, зона на тех же серверах
+Selectel). Диагностика и лечение те же, так что для каждого следующего
+домена достаточно добавить строку. Настройка живёт в
 `/etc/config/dhcp`, то есть переживает перезагрузку и попадает в штатный
 `sysupgrade -b`.
 
