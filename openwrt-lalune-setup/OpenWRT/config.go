@@ -54,6 +54,10 @@ type Config struct {
 	// второй цвет того же физического индикатора: гасить его совсем было
 	// бы плохо, роутер выглядел бы выключенным.
 	LedIdle string
+	// LanPort - проводной порт в мосте LAN (пустое значение — определить
+	// самостоятельно). LanLinkMode - "auto" или "100full", см. lanport.go.
+	LanPort     string
+	LanLinkMode string
 	// RebindDomains - домены, которые надо исключить из защиты dnsmasq от
 	// DNS rebinding (см. dnsmasq.go). Через запятую или пробелы.
 	RebindDomains string
@@ -153,6 +157,10 @@ func (a *App) loadConfig() {
 			a.config.LanSubnets = value
 		case "REBIND_DOMAINS":
 			a.config.RebindDomains = value
+		case "LAN_PORT":
+			a.config.LanPort = value
+		case "LAN_LINK_MODE":
+			a.config.LanLinkMode = strings.ToLower(value)
 		}
 	}
 
@@ -186,6 +194,8 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "LISTEN='%s'\n", a.config.Listen)
 	fmt.Fprintf(&b, "LAN_SUBNETS='%s'\n", a.config.LanSubnets)
 	fmt.Fprintf(&b, "REBIND_DOMAINS='%s'\n", a.config.RebindDomains)
+	fmt.Fprintf(&b, "LAN_PORT='%s'\n", a.config.LanPort)
+	fmt.Fprintf(&b, "LAN_LINK_MODE='%s'\n", a.config.LanLinkMode)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }

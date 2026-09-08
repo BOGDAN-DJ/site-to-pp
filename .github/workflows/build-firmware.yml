@@ -157,7 +157,7 @@ jobs:
         run: |
           make image \
             PROFILE="${{ github.event.inputs.profile }}" \
-            PACKAGES="kmod-tun curl" \
+            PACKAGES="kmod-tun curl ethtool" \
             FILES="/tmp/files"
           echo "=== получилось ==="
           ls -la bin/targets/*/*/

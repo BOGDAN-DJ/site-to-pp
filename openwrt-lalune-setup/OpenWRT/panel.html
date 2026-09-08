@@ -100,6 +100,30 @@ pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-rad
 </div>
 
 <div class="card">
+  <div class="state">
+    <strong style="font-size:14px">Проводной порт LAN <small id="lpdev" style="font-weight:400;color:var(--muted)"></small></strong>
+    <span id="lplink" class="badge off">…</span>
+  </div>
+  <div class="grid">
+    <div class="m"><div class="k">Скорость</div><div class="v" id="lpspeed">—</div></div>
+    <div class="m"><div class="k">Обрывов</div><div class="v" id="lpflaps">—</div></div>
+    <div class="m"><div class="k">CRC-ошибок</div><div class="v" id="lpcrc">—</div></div>
+  </div>
+  <div class="row">
+    <button id="lpauto" class="ghost">Автосогласование</button>
+    <button id="lp100" class="ghost">Только 100 Мбит/с</button>
+  </div>
+  <div id="lpmsg" class="msg"></div>
+  <div class="note">Помогает, когда устройство на 100 Мбит/с неустойчиво
+    согласуется с портом: линк рвётся по кругу, растут CRC-ошибки, клиент не
+    успевает получить адрес. Автосогласование при этом не отключается —
+    сужается лишь набор предлагаемых скоростей. Отключать его нельзя: вторая
+    сторона свалится в полудуплекс, и станет хуже.
+    <br><br>Растущие счётчики обрывов и CRC — признак проблемы на проводе или
+    в согласовании. У исправного соединения они стоят на месте.</div>
+</div>
+
+<div class="card">
   <div class="state"><strong style="font-size:14px" id="logtitle">Журнал</strong>
     <span class="row" style="margin:0">
       <button id="tablive" class="ghost">Текущий</button>
@@ -261,6 +285,63 @@ document.getElementById('rbsave').onclick = function () {
   });
 };
 
+function renderLanPort(p) {
+  if (!p || !p.device) {
+    document.getElementById('lpdev').textContent = '(порт не определён)';
+    return;
+  }
+  document.getElementById('lpdev').textContent = p.device;
+  var b = document.getElementById('lplink');
+  b.className = 'badge ' + (p.link ? 'on' : 'off');
+  b.textContent = p.link ? 'Линк есть' : 'Не подключено';
+  document.getElementById('lpspeed').textContent =
+    p.link && p.speed ? p.speed + ' Мбит/с' : '—';
+  document.getElementById('lpflaps').textContent = p.flaps;
+  document.getElementById('lpcrc').textContent = p.crc_errors;
+  // Активный режим показываем заливкой кнопки, чтобы было видно без чтения.
+  document.getElementById('lpauto').className =
+    p.mode === '100full' ? 'ghost' : '';
+  document.getElementById('lp100').className =
+    p.mode === '100full' ? '' : 'ghost';
+}
+
+function loadLanPort() {
+  j('/api/lanport').then(renderLanPort).catch(function () { });
+}
+
+function setLanMode(mode) {
+  document.getElementById('lpauto').disabled = true;
+  document.getElementById('lp100').disabled = true;
+  j('/api/lanport', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode })
+  }).then(function (p) {
+    document.getElementById('lpauto').disabled = false;
+    document.getElementById('lp100').disabled = false;
+    var m = document.getElementById('lpmsg');
+    if (p.success) {
+      m.className = 'msg ok';
+      m.textContent = mode === '100full'
+        ? 'Порт предлагает только 100 Мбит/с полный дуплекс'
+        : 'Обычное автосогласование восстановлено';
+      renderLanPort(p);
+    } else {
+      m.className = 'msg err';
+      m.textContent = p.error || 'не удалось';
+    }
+  }).catch(function () {
+    document.getElementById('lpauto').disabled = false;
+    document.getElementById('lp100').disabled = false;
+    var m = document.getElementById('lpmsg');
+    m.className = 'msg err';
+    m.textContent = 'Демон не отвечает';
+  });
+}
+
+document.getElementById('lpauto').onclick = function () { setLanMode('auto'); };
+document.getElementById('lp100').onclick = function () { setLanMode('100full'); };
+
 document.getElementById('reload').onclick = loadLog;
 document.getElementById('tablive').onclick = function () {
   setLogSource('/api/logs', 'Журнал');
@@ -272,7 +353,10 @@ document.getElementById('tabinc').onclick = function () {
 refresh();
 loadLog();
 loadRebind();
+loadLanPort();
 setInterval(refresh, 3000);
+// Счётчики порта обновляем реже: они меняются медленно, а запрос лезет в sysfs.
+setInterval(loadLanPort, 5000);
 </script>
 </body>
 </html>

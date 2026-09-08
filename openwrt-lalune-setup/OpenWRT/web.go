@@ -278,3 +278,69 @@ func (a *App) handleRebind(w http.ResponseWriter, r *http.Request) {
 		"active":  currentRebindDomains(),
 	})
 }
+
+// handleLanPort показывает состояние проводного порта LAN и переключает
+// режим согласования скорости.
+//
+// Живой счётчик обрывов и CRC-ошибок здесь важнее кнопки: именно по ним
+// видно, помогло переключение или нет. У здорового соединения оба стоят
+// на месте, у капризного растут на глазах.
+func (a *App) handleLanPort(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	dev := lanPort(a.config.LanPort)
+	mode := a.config.LanLinkMode
+	a.mu.Unlock()
+	if mode == "" {
+		mode = lanModeAuto
+	}
+
+	if r.Method == http.MethodGet {
+		writeJSON(w, lanPortStatus(dev, mode))
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не разобрать запрос"})
+		return
+	}
+
+	newMode := strings.ToLower(strings.TrimSpace(body.Mode))
+	if newMode != lanModeAuto && newMode != lanMode100Full {
+		writeJSON(w, map[string]interface{}{
+			"success": false,
+			"error":   "режим должен быть auto или 100full",
+		})
+		return
+	}
+	if dev == "" {
+		writeJSON(w, map[string]interface{}{
+			"success": false,
+			"error":   "не удалось определить проводной порт LAN",
+		})
+		return
+	}
+
+	a.mu.Lock()
+	a.config.LanLinkMode = newMode
+	a.mu.Unlock()
+
+	if err := a.saveConfig(); err != nil {
+		log("[CONFIG] Ошибка сохранения: %v", err)
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не сохранить конфиг"})
+		return
+	}
+
+	applyLanLinkMode(dev, newMode)
+
+	resp := lanPortStatus(dev, newMode)
+	resp["success"] = true
+	writeJSON(w, resp)
+}

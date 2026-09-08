@@ -133,6 +133,13 @@ func main() {
 	// Домены провайдера, которые иначе режет защита от DNS rebinding.
 	applyRebindDomains(app.config.RebindDomains)
 
+	// Режим согласования скорости на проводном порту LAN восстанавливаем
+	// при старте: ethtool настройку не сохраняет, она сбрасывается при
+	// перезагрузке и при пересоздании интерфейса.
+	if app.config.LanLinkMode == lanMode100Full {
+		applyLanLinkMode(lanPort(app.config.LanPort), app.config.LanLinkMode)
+	}
+
 	go app.watchdog()
 	go app.startAPI()
 
@@ -703,6 +710,7 @@ func (a *App) startAPI() {
 	mux.HandleFunc("/", a.handlePanel)
 	mux.HandleFunc("/api/config/link", a.handleLink)
 	mux.HandleFunc("/api/rebind", a.handleRebind)
+	mux.HandleFunc("/api/lanport", a.handleLanPort)
 
 	// Сохранённые на флеш логи прошлых сбоев — чтобы смотреть их из панели,
 	// а не только по ssh. Переживают перезагрузку, в отличие от /api/logs.
