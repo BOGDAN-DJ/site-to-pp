@@ -54,6 +54,9 @@ type Config struct {
 	// второй цвет того же физического индикатора: гасить его совсем было
 	// бы плохо, роутер выглядел бы выключенным.
 	LedIdle string
+	// RebindDomains - домены, которые надо исключить из защиты dnsmasq от
+	// DNS rebinding (см. dnsmasq.go). Через запятую или пробелы.
+	RebindDomains string
 	// LanSubnets - подсети через запятую, трафик которых заворачивается в
 	// туннель. Пустое значение означает "определить автоматически по
 	// адресам LAN-интерфейса из uci".
@@ -148,6 +151,8 @@ func (a *App) loadConfig() {
 			}
 		case "LAN_SUBNETS":
 			a.config.LanSubnets = value
+		case "REBIND_DOMAINS":
+			a.config.RebindDomains = value
 		}
 	}
 
@@ -180,6 +185,7 @@ func (a *App) saveConfig() error {
 	fmt.Fprintf(&b, "LED_IDLE='%s'\n", a.config.LedIdle)
 	fmt.Fprintf(&b, "LISTEN='%s'\n", a.config.Listen)
 	fmt.Fprintf(&b, "LAN_SUBNETS='%s'\n", a.config.LanSubnets)
+	fmt.Fprintf(&b, "REBIND_DOMAINS='%s'\n", a.config.RebindDomains)
 
 	return os.WriteFile(a.configFile, []byte(b.String()), 0600)
 }

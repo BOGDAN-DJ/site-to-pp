@@ -87,6 +87,19 @@ pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-rad
 </div>
 
 <div class="card">
+  <label for="rb">Домены провайдера в приватных адресах</label>
+  <input id="rb" placeholder="ats.example.pro, work.example.pro"
+         autocomplete="off" spellcheck="false">
+  <div class="row"><button id="rbsave">Применить</button></div>
+  <div id="rbmsg" class="msg"></div>
+  <div class="note">Исключения из защиты dnsmasq от DNS rebinding. Нужны для
+    сервисов, которые резолвятся в приватный адрес (10.x, 192.168.x,
+    172.16–31.x) — их ответ иначе отбрасывается. Поддомены включаются
+    автоматически. IP-адреса сюда не нужны: у них нет DNS-ответа, который
+    можно было бы отбросить.</div>
+</div>
+
+<div class="card">
   <div class="state"><strong style="font-size:14px" id="logtitle">Журнал</strong>
     <span class="row" style="margin:0">
       <button id="tablive" class="ghost">Текущий</button>
@@ -210,6 +223,44 @@ document.getElementById('save').onclick = function () {
   });
 };
 
+function rbMsg(text, ok) {
+  var m = document.getElementById('rbmsg');
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  m.textContent = text;
+}
+
+function loadRebind() {
+  j('/api/rebind').then(function (r) {
+    document.getElementById('rb').value = (r.domains || []).join(', ');
+  }).catch(function () { /* панель переживёт, поле просто останется пустым */ });
+}
+
+document.getElementById('rbsave').onclick = function () {
+  var raw = document.getElementById('rb').value;
+  // Пустое поле — законный ввод: так список очищается.
+  var list = raw.split(/[\s,]+/).filter(function (s) { return s; });
+  this.disabled = true;
+  j('/api/rebind', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domains: list })
+  }).then(function (r) {
+    document.getElementById('rbsave').disabled = false;
+    if (r.success) {
+      rbMsg(r.domains.length
+        ? 'Применено: ' + r.domains.join(', ')
+        : 'Список очищен', true);
+      document.getElementById('rb').value = (r.domains || []).join(', ');
+      setTimeout(loadLog, 500);
+    } else {
+      rbMsg(r.error || 'не сохранить', false);
+    }
+  }).catch(function () {
+    document.getElementById('rbsave').disabled = false;
+    rbMsg('Демон не отвечает', false);
+  });
+};
+
 document.getElementById('reload').onclick = loadLog;
 document.getElementById('tablive').onclick = function () {
   setLogSource('/api/logs', 'Журнал');
@@ -220,6 +271,7 @@ document.getElementById('tabinc').onclick = function () {
 
 refresh();
 loadLog();
+loadRebind();
 setInterval(refresh, 3000);
 </script>
 </body>

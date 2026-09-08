@@ -130,6 +130,9 @@ func main() {
 	// Зона csqtt могла пережить жёсткую перезагрузку — см. clearStaleFirewall.
 	clearStaleFirewall()
 
+	// Домены провайдера, которые иначе режет защита от DNS rebinding.
+	applyRebindDomains(app.config.RebindDomains)
+
 	go app.watchdog()
 	go app.startAPI()
 
@@ -699,6 +702,7 @@ func (a *App) startAPI() {
 
 	mux.HandleFunc("/", a.handlePanel)
 	mux.HandleFunc("/api/config/link", a.handleLink)
+	mux.HandleFunc("/api/rebind", a.handleRebind)
 
 	// Сохранённые на флеш логи прошлых сбоев — чтобы смотреть их из панели,
 	// а не только по ssh. Переживают перезагрузку, в отличие от /api/logs.

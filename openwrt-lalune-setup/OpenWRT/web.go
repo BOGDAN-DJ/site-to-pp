@@ -206,3 +206,75 @@ func (a *App) listenAddrs() []string {
 		"Задайте LISTEN в конфиге, если панель нужна из локальной сети.", dev)
 	return addrs
 }
+
+// handleRebind читает и правит список доменов, исключённых из защиты
+// dnsmasq от DNS rebinding.
+//
+// Живёт в конфиге демона, а не прямо в /etc/config/dhcp, чтобы у настройки
+// был один владелец: applyRebindDomains приводит dnsmasq в соответствие с
+// этим списком при каждом старте. Иначе панель показывала бы одно, а
+// работало бы другое.
+func (a *App) handleRebind(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		a.mu.Lock()
+		list := a.config.RebindDomains
+		a.mu.Unlock()
+		writeJSON(w, map[string]interface{}{
+			"domains": splitList(list),
+			"active":  currentRebindDomains(),
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Domains []string `json:"domains"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не разобрать запрос"})
+		return
+	}
+
+	// Нормализуем и проверяем до записи: половина применённого списка хуже,
+	// чем понятная ошибка.
+	var clean []string
+	seen := map[string]bool{}
+	for _, d := range body.Domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" || seen[d] {
+			continue
+		}
+		if !validDomain(d) {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"error":   "не похоже на доменное имя: " + d,
+			})
+			return
+		}
+		seen[d] = true
+		clean = append(clean, d)
+	}
+
+	a.mu.Lock()
+	a.config.RebindDomains = strings.Join(clean, ",")
+	list := a.config.RebindDomains
+	a.mu.Unlock()
+
+	if err := a.saveConfig(); err != nil {
+		log("[CONFIG] Ошибка сохранения: %v", err)
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не сохранить конфиг"})
+		return
+	}
+
+	applyRebindDomains(list)
+
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"domains": clean,
+		"active":  currentRebindDomains(),
+	})
+}
