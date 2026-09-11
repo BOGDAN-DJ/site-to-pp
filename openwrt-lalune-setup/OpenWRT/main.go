@@ -73,6 +73,20 @@ type App struct {
 	// По нему детектируется зависший туннель, см. watchdog.
 	lastActive time.Time
 
+	// watchCancel закрывается при отключении и останавливает logWatcher и
+	// finishConnect текущей сессии.
+	//
+	// Без этого они продолжали жить после Disconnect. Беда в том, что
+	// startCore пересоздаёт /tmp/csqtt-client.log при каждом подключении:
+	// осиротевший наблюдатель замечал, что файл стал короче, сбрасывал
+	// смещение и начинал скармливать СТАРОЙ finishConnect вывод НОВОГО
+	// ядра. Две горутины одновременно доходили до создания csqtt0, одна
+	// получала "device or resource busy", вызывала Disconnect и сносила
+	// туннель, который только что подняла другая.
+	watchCancel chan struct{}
+	// session - номер текущего подключения, см. sessionValid.
+	session uint64
+
 	// wantConnected - ЖЕЛАЕМОЕ состояние, в отличие от connected, который
 	// описывает фактическое. Их обязательно надо различать: попытка
 	// подключения может не удаться (например, канал в интернет пропал в
@@ -254,11 +268,32 @@ func (a *App) Connect() error {
 		onTraffic: trafficCh,
 	}
 	watchCancel := make(chan struct{})
-	go watcher.run(watchCancel)
 
-	go a.finishConnect(cmd, listenPort, tunConfCh, trafficCh, watchCancel)
+	a.mu.Lock()
+	// Номер сессии позволяет опоздавшей горутине понять, что её
+	// подключение уже отменили, и молча уйти вместо того, чтобы что-то
+	// делать с чужим туннелем.
+	a.session++
+	session := a.session
+	a.watchCancel = watchCancel
+	a.mu.Unlock()
+
+	go watcher.run(watchCancel)
+	go a.finishConnect(session, cmd, listenPort, tunConfCh, trafficCh, watchCancel)
 
 	return nil
+}
+
+// sessionValid сообщает, что подключение с этим номером всё ещё актуально.
+//
+// Нужна из-за того, что finishConnect живёт в отдельной горутине и может
+// провести в ожидании TUNCONF до полутора минут. За это время подключение
+// успевает быть отменённым и запущенным заново — и без этой проверки
+// старая горутина доделывала бы своё поверх нового туннеля.
+func (a *App) sessionValid(session uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.connected && a.session == session
 }
 
 // logCoreLine пишет строку из лога ядра в общий лог, прореживая те, что
@@ -298,7 +333,7 @@ func (a *App) logCoreLine(line string) {
 // finishConnect ждёт TUNCONF + первый признак трафика от ядра и только
 // после этого поднимает TUN, DNS, правила маршрутизации и firewall — ровно
 // так же, как это делают Desktop-клиенты LaLune (см. app_windows.go).
-func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunConf, trafficCh <-chan struct{}, watchCancel chan struct{}) {
+func (a *App) finishConnect(session uint64, cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunConf, trafficCh <-chan struct{}, watchCancel chan struct{}) {
 	var conf tunConf
 	hasConf, hasTraffic := false, false
 	deadline := time.After(connectTimeout)
@@ -320,6 +355,15 @@ func (a *App) finishConnect(cmd *exec.Cmd, listenPort int, tunConfCh <-chan tunC
 		case <-watchCancel:
 			return
 		}
+	}
+
+	// Между получением TUNCONF и этим местом подключение могло быть
+	// отменено и запущено заново. Создавать TUN тогда нельзя: интерфейс уже
+	// занят новой сессией, ioctl вернёт "device or resource busy", а
+	// следом Disconnect снесёт чужой, только что поднятый туннель.
+	if !a.sessionValid(session) {
+		log("[TUN] Подключение №%d отменено, пока ждали конфигурацию — выхожу", session)
+		return
 	}
 
 	ifce, err := setupTunDevice(a.currentTunName(), conf.ip, tunMTU)
@@ -441,6 +485,8 @@ func (a *App) Disconnect() bool {
 	bridgeCh := a.bridgeCh
 	subnets := a.lanSubnets
 	tunUp := a.tunUp
+	watchCancel := a.watchCancel
+	a.watchCancel = nil
 
 	a.connected = false
 	a.tunUp = false
@@ -456,6 +502,15 @@ func (a *App) Disconnect() bool {
 	a.mu.Unlock()
 
 	log("[INFO] Отключение...")
+
+	// Останавливаем наблюдателя за логом ядра и ожидающую finishConnect
+	// ПЕРВЫМ делом: пока они живы, следующее подключение пересоздаст
+	// /tmp/csqtt-client.log, осиротевший наблюдатель примет его за
+	// усечённый, начнёт читать с начала и разбудит старую finishConnect
+	// чужими событиями.
+	if watchCancel != nil {
+		close(watchCancel)
+	}
 
 	if bridgeCh != nil {
 		close(bridgeCh)
