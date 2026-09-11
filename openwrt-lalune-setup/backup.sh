@@ -30,14 +30,25 @@ if [ -z "$ROUTER" ]; then
 	exit 1
 fi
 
+# Порт ssh задаётся переменной SSH_PORT. Роутер бывает доступен не на 22:
+# например со стороны WAN, по проброшенному порту — именно этим путём до
+# него получается достучаться, когда машина не в его локальной сети.
+#
+#   SSH_PORT=45123 ./backup.sh root@192.168.31.179 ~/backups
+SSH="ssh"
 if scp -O 2>&1 | grep -q 'unknown option'; then SCP="scp"; else SCP="scp -O"; fi
+if [ -n "${SSH_PORT:-}" ]; then
+	SSH="ssh -p $SSH_PORT"
+	# У scp флаг порта пишется заглавной буквой, в отличие от ssh.
+	SCP="$SCP -P $SSH_PORT"
+fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DEST="$OUTDIR/$STAMP"
 mkdir -p "$DEST"
 
 echo "==> Собираю сведения о роутере"
-ssh "$ROUTER" 'sh -s' > "$DEST/info.txt" <<'REMOTE'
+$SSH "$ROUTER" 'sh -s' > "$DEST/info.txt" <<'REMOTE'
 echo "=== Дата бэкапа: $(date) ==="
 echo
 echo "--- Плата ---"
@@ -65,14 +76,14 @@ REMOTE
 echo "    $(grep -c '' "$DEST/info.txt") строк"
 
 echo "==> Список установленных пакетов"
-ssh "$ROUTER" '(apk list -I 2>/dev/null || opkg list-installed 2>/dev/null)' \
+$SSH "$ROUTER" '(apk list -I 2>/dev/null || opkg list-installed 2>/dev/null)' \
 	| sort > "$DEST/packages.txt"
 echo "    $(grep -c '' "$DEST/packages.txt") пакетов"
 
 echo "==> Штатный конфиг-бэкап (sysupgrade -b)"
 # Пригодится, если роутер придётся прошивать начисто: этот архив
 # восстанавливается штатным `sysupgrade -r` и не тащит за собой бинарники.
-ssh "$ROUTER" 'sysupgrade -b - 2>/dev/null' > "$DEST/config.tar.gz"
+$SSH "$ROUTER" 'sysupgrade -b - 2>/dev/null' > "$DEST/config.tar.gz"
 echo "    $(du -h "$DEST/config.tar.gz" | cut -f1)"
 
 echo "==> Overlay целиком (это и есть полный бэкап)"
@@ -85,7 +96,7 @@ echo "==> Overlay целиком (это и есть полный бэкап)"
 # tar здесь busybox-овский: у него нет --exclude, вместо этого -X с файлом
 # шаблонов. Ошибки чтения глушим — в overlay попадаются сокеты и файлы,
 # исчезающие прямо во время архивации, и падать из-за них не нужно.
-ssh "$ROUTER" 'sh -s' > "$DEST/overlay.tar.gz" <<'REMOTE'
+$SSH "$ROUTER" 'sh -s' > "$DEST/overlay.tar.gz" <<'REMOTE'
 cat > /tmp/backup-exclude <<'EXC'
 ./tmp/*
 ./var/*

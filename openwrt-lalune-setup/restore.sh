@@ -35,12 +35,20 @@ if [ ! -f "$ARCHIVE" ]; then
 	exit 1
 fi
 
+# Порт ssh задаётся переменной SSH_PORT — см. комментарий в backup.sh.
+# Восстанавливать бэкап приходится как раз тогда, когда роутер доступен не
+# самым обычным путём, так что возможность указать порт тут не роскошь.
+SSH="ssh"
 if scp -O 2>&1 | grep -q 'unknown option'; then SCP="scp"; else SCP="scp -O"; fi
+if [ -n "${SSH_PORT:-}" ]; then
+	SSH="ssh -p $SSH_PORT"
+	SCP="$SCP -P $SSH_PORT"
+fi
 
 SIZE="$(du -h "$ARCHIVE" | cut -f1)"
 
 echo "==> Проверяю совместимость"
-REMOTE_REL="$(ssh "$ROUTER" "sed -n \"s/^DISTRIB_RELEASE='\(.*\)'/\1/p\" /etc/openwrt_release")"
+REMOTE_REL="$($SSH "$ROUTER" "sed -n \"s/^DISTRIB_RELEASE='\(.*\)'/\1/p\" /etc/openwrt_release")"
 INFO="$(dirname "$ARCHIVE")/info.txt"
 if [ -f "$INFO" ]; then
 	BACKUP_REL="$(sed -n "s/^DISTRIB_RELEASE='\(.*\)'/\1/p" "$INFO")"
@@ -77,7 +85,7 @@ echo "==> Заливаю архив"
 $SCP "$ARCHIVE" "$ROUTER:/tmp/restore-overlay.tar.gz"
 
 echo "==> Останавливаю сервисы и распаковываю"
-ssh "$ROUTER" 'sh -s' <<'REMOTE'
+$SSH "$ROUTER" 'sh -s' <<'REMOTE'
 set -e
 
 # Демон сам снимает маршруты, firewall и TUN по SIGTERM — даём ему это
