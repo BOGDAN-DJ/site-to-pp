@@ -48,7 +48,11 @@ fi
 SIZE="$(du -h "$ARCHIVE" | cut -f1)"
 
 echo "==> Проверяю совместимость"
-REMOTE_REL="$($SSH "$ROUTER" "sed -n \"s/^DISTRIB_RELEASE='\(.*\)'/\1/p\" /etc/openwrt_release")"
+# </dev/null обязателен: ssh по умолчанию читает stdin и при неинтерактивном
+# запуске (`echo y | ./restore.sh ...`) съедал бы ответ, предназначенный
+# вопросу ниже. Скрипт при этом обрывался на неудачном read из-за set -e,
+# успев напечатать только само приглашение.
+REMOTE_REL="$($SSH "$ROUTER" "sed -n \"s/^DISTRIB_RELEASE='\(.*\)'/\1/p\" /etc/openwrt_release" </dev/null)"
 INFO="$(dirname "$ARCHIVE")/info.txt"
 if [ -f "$INFO" ]; then
 	BACKUP_REL="$(sed -n "s/^DISTRIB_RELEASE='\(.*\)'/\1/p" "$INFO")"

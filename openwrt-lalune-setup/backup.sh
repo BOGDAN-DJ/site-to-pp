@@ -83,7 +83,7 @@ echo "    $(grep -c '' "$DEST/packages.txt") пакетов"
 echo "==> Штатный конфиг-бэкап (sysupgrade -b)"
 # Пригодится, если роутер придётся прошивать начисто: этот архив
 # восстанавливается штатным `sysupgrade -r` и не тащит за собой бинарники.
-$SSH "$ROUTER" 'sysupgrade -b - 2>/dev/null' > "$DEST/config.tar.gz"
+$SSH "$ROUTER" 'sysupgrade -b - 2>/dev/null' </dev/null > "$DEST/config.tar.gz"
 echo "    $(du -h "$DEST/config.tar.gz" | cut -f1)"
 
 echo "==> Overlay целиком (это и есть полный бэкап)"
