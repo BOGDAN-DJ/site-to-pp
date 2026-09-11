@@ -22,12 +22,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	stdlog "log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -72,6 +74,16 @@ type App struct {
 	// lastActive - когда ядро последний раз сообщало о живых сессиях.
 	// По нему детектируется зависший туннель, см. watchdog.
 	lastActive time.Time
+
+	// coreStdin - канал управления ядра. Через него уходит ответ на запрос
+	// капчи, см. captcha.go.
+	coreStdin io.WriteCloser
+	// captcha - незакрытый запрос капчи, captchaSeen - счётчик за сессию.
+	captcha     *captchaRequest
+	captchaSeen int
+	// captchaBlocked - ВК отклонила авторизацию как ботовую в текущей
+	// попытке. Сбрасывается при каждом новом подключении.
+	captchaBlocked bool
 
 	// watchCancel закрывается при отключении и останавливает logWatcher и
 	// finishConnect текущей сессии.
@@ -239,7 +251,7 @@ func (a *App) Connect() error {
 	args := buildCoreArgs(cfg, listenPort)
 	log("[INFO] Запуск ядра: %s %s", corePath, safeArgsForLog(args))
 
-	cmd, done, err := startCore(corePath, logPath, args)
+	cmd, stdin, done, err := startCore(corePath, logPath, args)
 	if err != nil {
 		return fmt.Errorf("не удалось запустить ядро: %w", err)
 	}
@@ -248,11 +260,13 @@ func (a *App) Connect() error {
 	a.connected = true
 	a.coreCmd = cmd
 	a.coreDone = done
+	a.coreStdin = stdin
 	a.corePID = cmd.Process.Pid
 	a.lanSubnets = subnets
 	// Считаем сессии живыми на момент запуска, иначе детектор зависания
 	// сработает раньше, чем ядро успеет их поднять.
 	a.lastActive = time.Now()
+	a.captchaBlocked = false
 	a.mu.Unlock()
 
 	log("[INFO] Ядро запущено (PID %d), слушаю порт %d", cmd.Process.Pid, listenPort)
@@ -301,6 +315,12 @@ func (a *App) sessionValid(session uint64) bool {
 // статистики при этом всегда сохраняется целиком и отдаётся в /api/status,
 // так что текущие цифры доступны без выуживания их из лога.
 func (a *App) logCoreLine(line string) {
+	// Запрос капчи уходит в отдельный канал, а в общий лог — только
+	// человекочитаемое уведомление: в строке есть одноразовый session_token.
+	if a.noteCaptchaRequest(line) {
+		return
+	}
+
 	if coreNoise["stats"].MatchString(line) {
 		// Отметка живых сессий нужна watchdog: по ней он отличает
 		// работающий туннель от зависшего.
@@ -310,6 +330,14 @@ func (a *App) logCoreLine(line string) {
 		if active > 0 {
 			a.lastActive = time.Now()
 		}
+		a.mu.Unlock()
+	}
+
+	// Отдельно отмечаем отказ из-за антибот-проверки: по нему выбирается
+	// длинная пауза, а панель показывает внятную причину вместо таймаута.
+	if strings.Contains(line, "check status=BOT") {
+		a.mu.Lock()
+		a.captchaBlocked = true
 		a.mu.Unlock()
 	}
 
@@ -487,6 +515,9 @@ func (a *App) Disconnect() bool {
 	tunUp := a.tunUp
 	watchCancel := a.watchCancel
 	a.watchCancel = nil
+	stdin := a.coreStdin
+	a.coreStdin = nil
+	a.captcha = nil
 
 	a.connected = false
 	a.tunUp = false
@@ -510,6 +541,9 @@ func (a *App) Disconnect() bool {
 	// чужими событиями.
 	if watchCancel != nil {
 		close(watchCancel)
+	}
+	if stdin != nil {
+		stdin.Close()
 	}
 
 	if bridgeCh != nil {
@@ -552,6 +586,14 @@ const (
 	retryDelayMin = 10 * time.Second
 	retryDelayMax = 5 * time.Minute
 )
+
+// Отдельная пауза для случая, когда ВК потребовала капчу.
+//
+// Быстрый повтор здесь бесполезен и вреден: причина не в связи, а в
+// репутации адреса, и десяток попыток подряд её только ухудшает. У
+// мобильных операторов адрес со временем меняется, так что ждать разумнее
+// долго. Ловится по строке из лога ядра, см. noteCaptchaFailure.
+const retryDelayCaptcha = 10 * time.Minute
 
 // RequestConnect и RequestDisconnect выражают НАМЕРЕНИЕ пользователя, в
 // отличие от Connect/Disconnect, которые просто выполняют механику. Разница
@@ -600,7 +642,25 @@ func (a *App) scheduleRetry(reason string) {
 	if a.retryDelay *= 2; a.retryDelay > retryDelayMax {
 		a.retryDelay = retryDelayMax
 	}
+
+	// Отказ из-за антибот-проверки лечится не настойчивостью, а временем:
+	// дело в репутации адреса, и частые попытки её только ухудшают.
+	captcha := a.captchaBlocked
+	if captcha {
+		delay = retryDelayCaptcha
+		a.nextRetry = time.Now().Add(delay)
+		a.retryDelay = retryDelayCaptcha
+	}
 	a.mu.Unlock()
+
+	if captcha {
+		log("[WATCHDOG] ВК не пропустила авторизацию (антибот-проверка). "+
+			"Это не сбой связи: у мобильных операторов адрес общий, и ВК "+
+			"считает его подозрительным. Следующая попытка через %s; "+
+			"с проводного канала обычно проходит сразу.", delay)
+		a.persistLogs("ВК отклонила авторизацию как ботовую")
+		return
+	}
 
 	log("[WATCHDOG] Не удалось подключиться (%s) — повтор через %s", reason, delay)
 	a.persistLogs("не удалось подключиться: " + reason)
@@ -766,6 +826,7 @@ func (a *App) startAPI() {
 	mux.HandleFunc("/api/config/link", a.handleLink)
 	mux.HandleFunc("/api/rebind", a.handleRebind)
 	mux.HandleFunc("/api/lanport", a.handleLanPort)
+	mux.HandleFunc("/api/captcha", a.handleCaptcha)
 
 	// Сохранённые на флеш логи прошлых сбоев — чтобы смотреть их из панели,
 	// а не только по ssh. Переживают перезагрузку, в отличие от /api/logs.

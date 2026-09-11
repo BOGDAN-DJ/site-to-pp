@@ -86,6 +86,24 @@ pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-rad
     даже после сохранения.</div>
 </div>
 
+<div class="card" id="capcard" hidden>
+  <div class="state">
+    <strong style="font-size:14px">ВК требует пройти капчу</strong>
+    <span id="capwait" class="badge wait">…</span>
+  </div>
+  <div class="note" style="margin-top:10px">Ядро не может авторизоваться, пока
+    проверка не пройдена. Откройте ссылку, решите капчу — и, если установлен
+    юзерскрипт, токен вернётся сюда сам. Иначе вставьте его вручную.</div>
+  <div class="row">
+    <a id="caplink" href="#" target="_blank" rel="noopener noreferrer">
+      <button type="button">Открыть капчу</button></a>
+  </div>
+  <label for="captoken" style="margin-top:12px">Токен (если не вернулся сам)</label>
+  <input id="captoken" placeholder="success_token" autocomplete="off" spellcheck="false">
+  <div class="row"><button id="capsend">Отправить ядру</button></div>
+  <div id="capmsg" class="msg"></div>
+</div>
+
 <div class="card">
   <label for="rb">Домены провайдера в приватных адресах</label>
   <input id="rb" placeholder="ats.example.pro, work.example.pro"
@@ -155,9 +173,16 @@ function setBadge(st) {
   else if (st.connected) { b.classList.add('wait'); b.textContent = 'Подключение…'; }
   else if (st.retrying) {
     b.classList.add('wait');
-    b.textContent = st.retry_in_sec
-      ? 'Повтор через ' + st.retry_in_sec + ' с'
-      : 'Повторная попытка…';
+    if (st.captcha_blocked) {
+      // Отдельная формулировка: это не сбой связи, и ждать долго.
+      b.textContent = st.retry_in_sec
+        ? 'ВК требует капчу, повтор через ' + Math.ceil(st.retry_in_sec / 60) + ' мин'
+        : 'ВК требует капчу';
+    } else {
+      b.textContent = st.retry_in_sec
+        ? 'Повтор через ' + st.retry_in_sec + ' с'
+        : 'Повторная попытка…';
+    }
   }
   else { b.classList.add('off'); b.textContent = 'Выключен'; }
   t.textContent = (st.connected || st.retrying) ? 'Отключить' : 'Подключить';
@@ -285,6 +310,51 @@ document.getElementById('rbsave').onclick = function () {
   });
 };
 
+function loadCaptcha() {
+  j('/api/captcha').then(function (c) {
+    var card = document.getElementById('capcard');
+    if (!c.pending) {
+      // Карточку прячем, только если она не занята отправкой: иначе
+      // сообщение об ошибке исчезнет раньше, чем его успеют прочитать.
+      if (!card.dataset.busy) card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    document.getElementById('caplink').href = c.redirect_uri;
+    document.getElementById('capwait').textContent = 'ждём ' + c.waiting_sec + ' с';
+  }).catch(function () { });
+}
+
+document.getElementById('capsend').onclick = function () {
+  var token = document.getElementById('captoken').value.trim();
+  var card = document.getElementById('capcard');
+  var m = document.getElementById('capmsg');
+  if (!token) { m.className = 'msg err'; m.textContent = 'Вставьте токен'; return; }
+  card.dataset.busy = '1';
+  this.disabled = true;
+  j('/api/captcha', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: token })
+  }).then(function (r) {
+    document.getElementById('capsend').disabled = false;
+    delete card.dataset.busy;
+    if (r.success) {
+      m.className = 'msg ok';
+      m.textContent = 'Токен передан ядру';
+      document.getElementById('captoken').value = '';
+    } else {
+      m.className = 'msg err';
+      m.textContent = r.error || 'не удалось';
+    }
+  }).catch(function () {
+    document.getElementById('capsend').disabled = false;
+    delete card.dataset.busy;
+    m.className = 'msg err';
+    m.textContent = 'Демон не отвечает';
+  });
+};
+
 function renderLanPort(p) {
   if (!p || !p.device) {
     document.getElementById('lpdev').textContent = '(порт не определён)';
@@ -354,9 +424,12 @@ refresh();
 loadLog();
 loadRebind();
 loadLanPort();
+loadCaptcha();
 setInterval(refresh, 3000);
 // Счётчики порта обновляем реже: они меняются медленно, а запрос лезет в sysfs.
 setInterval(loadLanPort, 5000);
+// Капчу опрашиваем чаще: ядро ждёт ответа считанные десятки секунд.
+setInterval(loadCaptcha, 2000);
 </script>
 </body>
 </html>

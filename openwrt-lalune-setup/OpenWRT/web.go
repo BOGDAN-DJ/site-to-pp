@@ -47,10 +47,14 @@ type statusSnapshot struct {
 	// Retrying и RetryIn показывают, что демон не сдался, а ждёт повтора.
 	// Без этого панель рисовала бы просто «Выключен», и отличить «не смог и
 	// перестал пытаться» от «сейчас попробует снова» было бы невозможно.
-	Retrying    bool   `json:"retrying"`
-	RetryIn     int    `json:"retry_in_sec"`
-	Configured  bool   `json:"configured"`
-	AutoConnect string `json:"autoconnect"`
+	Retrying bool `json:"retrying"`
+	// CaptchaBlocked - последняя неудача была из-за антибот-проверки ВК.
+	// Панель показывает это отдельно: причина не в связи, и ждать придётся
+	// заметно дольше обычного.
+	CaptchaBlocked bool   `json:"captcha_blocked"`
+	RetryIn        int    `json:"retry_in_sec"`
+	Configured     bool   `json:"configured"`
+	AutoConnect    string `json:"autoconnect"`
 
 	Version string `json:"version"`
 }
@@ -58,17 +62,18 @@ type statusSnapshot struct {
 func (a *App) snapshot() statusSnapshot {
 	a.mu.Lock()
 	s := statusSnapshot{
-		Connected:   a.connected,
-		TunUp:       a.tunUp,
-		PID:         a.corePID,
-		CoreStats:   a.coreStats,
-		Workers:     a.config.Workers,
-		TunName:     a.config.Tun,
-		TunIP:       a.tunIP,
-		Peer:        a.config.Peer,
-		Retrying:    a.wantConnected && !a.connected && !a.nextRetry.IsZero(),
-		AutoConnect: a.config.AutoConnect,
-		Version:     daemonVersion,
+		Connected:      a.connected,
+		TunUp:          a.tunUp,
+		PID:            a.corePID,
+		CoreStats:      a.coreStats,
+		Workers:        a.config.Workers,
+		TunName:        a.config.Tun,
+		TunIP:          a.tunIP,
+		Peer:           a.config.Peer,
+		Retrying:       a.wantConnected && !a.connected && !a.nextRetry.IsZero(),
+		CaptchaBlocked: a.captchaBlocked,
+		AutoConnect:    a.config.AutoConnect,
+		Version:        daemonVersion,
 	}
 	s.Configured = a.config.Peer != "" && a.config.Password != "" && a.config.VkHashes != ""
 	if !a.connectedAt.IsZero() && a.connected {
@@ -343,4 +348,56 @@ func (a *App) handleLanPort(w http.ResponseWriter, r *http.Request) {
 	resp := lanPortStatus(dev, newMode)
 	resp["success"] = true
 	writeJSON(w, resp)
+}
+
+// handleCaptcha отдаёт незакрытый запрос капчи и принимает решение.
+//
+// Демон капчу не решает — он только доставляет запрос человеку и передаёт
+// ответ ядру. Токен приходит либо от юзерскрипта в браузере, либо руками
+// из панели; подробности протокола — в captcha.go.
+func (a *App) handleCaptcha(w http.ResponseWriter, r *http.Request) {
+	// Юзерскрипт работает на странице VK, то есть с чужого источника.
+	// Без этого заголовка браузер не даст ему отправить сюда токен.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		req := a.pendingCaptcha()
+		a.mu.Lock()
+		seen := a.captchaSeen
+		a.mu.Unlock()
+
+		resp := map[string]interface{}{"pending": req != nil, "seen": seen}
+		if req != nil {
+			resp["mode"] = req.Mode
+			resp["redirect_uri"] = req.RedirectURI
+			resp["waiting_sec"] = req.WaitingSec
+		}
+		writeJSON(w, resp)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": "не разобрать запрос"})
+		return
+	}
+
+	if err := a.solveCaptcha(body.Token); err != nil {
+		writeJSON(w, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]interface{}{"success": true})
 }

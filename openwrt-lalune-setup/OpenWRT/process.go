@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -221,21 +222,35 @@ func (w *logWatcher) handleLine(line string) {
 // единственный безопасный (без гонки по данным) способ для другой горутины
 // (watchdog) узнать, что ядро умерло, не читая внутренние поля exec.Cmd,
 // которые cmd.Wait() пишет без синхронизации.
-func startCore(corePath, logPath string, args []string) (*exec.Cmd, <-chan struct{}, error) {
+func startCore(corePath, logPath string, args []string) (*exec.Cmd, io.WriteCloser, <-chan struct{}, error) {
 	os.Remove(logPath)
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	cmd := exec.Command(corePath, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	if err := cmd.Start(); err != nil {
+	// stdin - канал управления ядра. Через него принимаются команды PAUSE,
+	// RESUME, STOP и, что нужно нам, CAPTCHA_RESULT|<токен>.
+	//
+	// Раньше stdin не подключался вовсе, и ядро видело его закрытым. Само по
+	// себе это работало, но отвечать на запрос капчи было нечем: ядро писало
+	// CAPTCHA_SOLVE в stdout и ждало ответа, которого физически неоткуда было
+	// взять, — отсюда и зависания до таймаута на WebView-шагах.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		logFile.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		logFile.Close()
+		return nil, nil, nil, err
 	}
 
 	done := make(chan struct{})
@@ -245,5 +260,5 @@ func startCore(corePath, logPath string, args []string) (*exec.Cmd, <-chan struc
 		close(done)
 	}()
 
-	return cmd, done, nil
+	return cmd, stdin, done, nil
 }
