@@ -827,6 +827,7 @@ func (a *App) startAPI() {
 	mux.HandleFunc("/api/rebind", a.handleRebind)
 	mux.HandleFunc("/api/lanport", a.handleLanPort)
 	mux.HandleFunc("/api/captcha", a.handleCaptcha)
+	mux.HandleFunc("/csqtt-captcha.user.js", a.handleUserScript)
 
 	// Сохранённые на флеш логи прошлых сбоев — чтобы смотреть их из панели,
 	// а не только по ssh. Переживают перезагрузку, в отличие от /api/logs.

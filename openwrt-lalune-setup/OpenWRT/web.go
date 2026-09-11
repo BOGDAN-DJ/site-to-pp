@@ -401,3 +401,26 @@ func (a *App) handleCaptcha(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]interface{}{"success": true})
 }
+
+//go:embed files/csqtt-captcha.user.js
+var captchaUserScript string
+
+// handleUserScript отдаёт юзерскрипт для возврата токена капчи.
+//
+// Отдаётся из панели, а не берётся из репозитория руками, по двум
+// причинам. Во-первых, менеджеры юзерскриптов распознают ссылку,
+// оканчивающуюся на .user.js, и предлагают установку в один клик. Во-вторых,
+// адрес панели подставляется здесь же: иначе его пришлось бы править в
+// файле вручную, а на роутере с нестандартным LAN-адресом про это легко
+// забыть и потом гадать, почему токен не возвращается.
+func (a *App) handleUserScript(w http.ResponseWriter, r *http.Request) {
+	// Куда скрипту слать токен: тот адрес, по которому открыта панель.
+	// r.Host уже содержит порт.
+	endpoint := "http://" + r.Host + "/api/captcha"
+	script := strings.Replace(captchaUserScript,
+		"var PANEL = 'http://192.168.1.1:8080/api/captcha';",
+		"var PANEL = '"+endpoint+"';", 1)
+
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Write([]byte(script))
+}

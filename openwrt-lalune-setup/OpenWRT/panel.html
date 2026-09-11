@@ -101,6 +101,11 @@ pre{margin:10px 0 0;background:var(--bg);border:1px solid var(--line);border-rad
   <label for="captoken" style="margin-top:12px">Токен (если не вернулся сам)</label>
   <input id="captoken" placeholder="success_token" autocomplete="off" spellcheck="false">
   <div class="row"><button id="capsend">Отправить ядру</button></div>
+  <div class="note">Чтобы токен возвращался сам, установите
+    <a href="/csqtt-captcha.user.js">юзерскрипт</a> (нужен Tampermonkey или
+    Violentmonkey). Он делает то же, что WebView в Android-приложении:
+    перехватывает результат проверки на странице ВК. Адрес роутера
+    подставляется автоматически.</div>
   <div id="capmsg" class="msg"></div>
 </div>
 
